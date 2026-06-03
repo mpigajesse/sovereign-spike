@@ -236,12 +236,12 @@ async fn handle_write(
     // 6. Mise à jour du stock (UPSERT)
     match op_type {
         OpType::Sale => {
+            // UPDATE seul (la ligne existe forcément : vérifiée par le FOR UPDATE ci-dessus)
             sqlx::query(
-                "INSERT INTO stock (item_id, quantity) VALUES ($1, -$2) \
-                 ON CONFLICT (item_id) DO UPDATE SET quantity = stock.quantity - $2",
+                "UPDATE stock SET quantity = quantity - $1 WHERE item_id = $2",
             )
-            .bind(&req.item_id)
             .bind(req.quantity)
+            .bind(&req.item_id)
             .execute(&mut *tx)
             .await
             .map_err(internal_error)?;
