@@ -1,0 +1,14 @@
+# pg_hba.conf — règles à ajouter pour autoriser la réplication streaming
+#
+# Ajouter ces lignes dans pg_hba.conf du nœud actif.
+# Remplacer STANDBY_IP par l'adresse IP réelle du standby.
+
+# Connexion de réplication depuis le standby
+# (utiliser scram-sha-256 en production, md5 acceptable en dev local)
+host    replication     replicator      192.168.200.130/32  scram-sha-256
+
+# Connexion applicative du nœud actif (DEK + journal)
+host    sovereign_active  sovereign     127.0.0.1/32        scram-sha-256
+
+# ── Création du rôle de réplication (à exécuter en psql) ────────────────────
+# CREATE ROLE replicator WITH REPLICATION LOGIN PASSWORD 'changeme_spike';

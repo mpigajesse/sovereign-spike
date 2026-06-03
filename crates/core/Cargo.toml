@@ -1,0 +1,16 @@
+[package]
+name    = "sovereign-core"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+sodiumoxide.workspace = true
+ciborium.workspace    = true
+serde.workspace       = true
+serde_bytes.workspace = true
+uuid.workspace        = true
+chrono.workspace      = true
+thiserror.workspace   = true
+
+[dev-dependencies]
+hex = "0.4"

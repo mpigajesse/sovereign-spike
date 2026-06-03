@@ -1,0 +1,26 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+Cargo.lock
+
+# Bases SQLite (données locales des nœuds passifs)
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets et environnement — NE JAMAIS COMMITTER
+scripts/shared.env
+.env
+*.env
+!*.env.example
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
