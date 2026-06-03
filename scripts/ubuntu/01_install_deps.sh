@@ -23,19 +23,15 @@ sudo apt-get install -y \
 
 echo "OK"
 
-# ── 2. PostgreSQL 16 serveur ──────────────────────────────────────────────────
+# ── 2. PostgreSQL 18 serveur (doit correspondre au primary Windows) ──────────
 echo ""
-echo "[2/5] Installation PostgreSQL 16 serveur..."
+echo "[2/5] PostgreSQL 18 serveur (déjà installé via 00_install_postgres18_pgadmin.sh)..."
 if ! command -v pg_basebackup &>/dev/null; then
-    sudo apt-get install -y \
-        postgresql-16 \
-        postgresql-contrib-16
-    # Arrêter le service PostgreSQL par défaut (le standby démarre via pg_basebackup)
-    sudo systemctl stop postgresql
-    sudo systemctl disable postgresql
-    echo "PostgreSQL 16 installé (service arrêté — sera démarré comme standby)."
+    echo "  ATTENTION : PostgreSQL non trouvé."
+    echo "  Exécuter d'abord : bash 00_install_postgres18_pgadmin.sh"
+    exit 1
 else
-    echo "PostgreSQL déjà installé."
+    echo "  PostgreSQL $(pg_basebackup --version | awk '{print $3}') déjà disponible."
 fi
 
 # ── 3. Rust ───────────────────────────────────────────────────────────────────

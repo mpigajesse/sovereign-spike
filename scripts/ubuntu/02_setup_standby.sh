@@ -16,7 +16,7 @@ set -euo pipefail
 PRIMARY_IP="192.168.200.1"
 PRIMARY_PORT="5432"
 STANDBY_NAME="sovereign_standby"    # doit correspondre à synchronous_standby_names sur primary
-PG_DATA="/var/lib/postgresql/16/main"
+PG_DATA="/var/lib/postgresql/18/main"
 PG_SLOT="sovereign_slot"
 
 echo "=== sovereign-spike :: Setup PostgreSQL STANDBY ==="
@@ -39,7 +39,7 @@ echo "OK"
 # ── Arrêter PostgreSQL si déjà démarré ───────────────────────────────────────
 echo ""
 echo "[2/5] Arrêt du PostgreSQL local (si actif)..."
-sudo systemctl stop postgresql@16-main 2>/dev/null || true
+sudo systemctl stop postgresql@18-main 2>/dev/null || true
 # Vider le répertoire de données existant (pg_basebackup l'exige vide)
 if [ -d "$PG_DATA" ] && [ "$(ls -A $PG_DATA)" ]; then
     echo "  ATTENTION : $PG_DATA n'est pas vide."
@@ -86,7 +86,7 @@ echo "OK — standby.signal créé"
 # ── Démarrage du standby ──────────────────────────────────────────────────────
 echo ""
 echo "[5/5] Démarrage de PostgreSQL en mode standby..."
-sudo systemctl start postgresql@16-main
+sudo systemctl start postgresql@18-main
 sleep 3
 
 # Vérification
@@ -94,7 +94,7 @@ if sudo -u postgres pg_isready -h localhost -p 5432; then
     echo "PostgreSQL standby démarré."
 else
     echo "ERREUR : PostgreSQL n'a pas démarré. Consulter :"
-    echo "  sudo journalctl -u postgresql@16-main -n 50"
+    echo "  sudo journalctl -u postgresql@18-main -n 50"
     exit 1
 fi
 
