@@ -69,7 +69,7 @@ postgresql:
     max_wal_senders:         3
     wal_keep_size:           64
     synchronous_commit:      on
-    synchronous_standby_names: sovereign-standby
+    synchronous_standby_names: sovereign_standby
     hot_standby:             on
     hot_standby_feedback:    on
     log_connections:         on

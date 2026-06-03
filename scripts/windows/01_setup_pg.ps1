@@ -1,11 +1,11 @@
 # =============================================================================
-# 01_setup_pg.ps1 — Configuration PostgreSQL 16 sur Windows (PRIMARY)
+# 01_setup_pg.ps1 — Configuration PostgreSQL 18 sur Windows (PRIMARY)
 # Machine : Windows 11 physique — 192.168.200.1
 # À exécuter UNE SEULE FOIS en tant qu'administrateur.
 # =============================================================================
 
-$PG_BIN   = "C:\Program Files\PostgreSQL\16\bin"
-$PG_DATA  = "C:\Program Files\PostgreSQL\16\data"
+$PG_BIN   = "C:\Program Files\PostgreSQL\18\bin"
+$PG_DATA  = "C:\Program Files\PostgreSQL\18\data"
 $PG_CONF  = "$PG_DATA\postgresql.conf"
 
 Write-Host "=== sovereign-spike :: Setup PostgreSQL Primary ===" -ForegroundColor Cyan
@@ -14,7 +14,7 @@ Write-Host "=== sovereign-spike :: Setup PostgreSQL Primary ===" -ForegroundColo
 Write-Host "`n[1/5] Vérification de psql..." -ForegroundColor Yellow
 $psql = "$PG_BIN\psql.exe"
 if (-not (Test-Path $psql)) {
-    Write-Error "psql non trouvé : $psql`nVérifier le chemin d'installation PG 16."
+    Write-Error "psql non trouvé : $psql`nVérifier le chemin d'installation PG 18."
     exit 1
 }
 & $psql --version
@@ -76,7 +76,7 @@ if ($current_hba -notmatch "sovereign-spike") {
 
 # ── 5. Redémarrer PostgreSQL pour prendre en compte les changements ──────────
 Write-Host "`n[5/5] Redémarrage du service PostgreSQL..." -ForegroundColor Yellow
-Restart-Service -Name "postgresql-x64-16" -ErrorAction SilentlyContinue
+Restart-Service -Name "postgresql-x64-18" -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) {
     # Essai avec le nom court
     Restart-Service -Name "postgresql*" -Force -ErrorAction SilentlyContinue

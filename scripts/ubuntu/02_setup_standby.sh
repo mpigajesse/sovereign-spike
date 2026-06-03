@@ -15,7 +15,7 @@ set -euo pipefail
 
 PRIMARY_IP="192.168.200.1"
 PRIMARY_PORT="5432"
-STANDBY_NAME="sovereign-standby"    # doit correspondre à synchronous_standby_names sur primary
+STANDBY_NAME="sovereign_standby"    # doit correspondre à synchronous_standby_names sur primary
 PG_DATA="/var/lib/postgresql/16/main"
 PG_SLOT="sovereign_slot"
 
@@ -102,6 +102,6 @@ echo ""
 echo "=== Setup Standby terminé ==="
 echo "Vérifications :"
 echo "  Sur Windows pgAdmin → SELECT * FROM pg_stat_replication;"
-echo "  → doit afficher sovereign-standby avec state=streaming"
+echo "  → doit afficher sovereign_standby avec state=streaming"
 echo ""
 echo "Prochain script : 03_start_passive.sh"
