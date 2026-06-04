@@ -156,10 +156,24 @@
 - ✅ Page Journal : blobs chiffrés paginés, explication zéro-knowledge
 - ✅ Page Sécurité : fencing/époque, stack cryptographique, promote
 - ✅ UI design dark premium (CSS custom properties, sans framework CSS)
-- ✅ Build production fonctionnel (dist/ 159KB JS + 5KB CSS)
-- ⬜ Icônes app (icons/*.png) — à générer
-- ⬜ Bundle .exe signé (tauri build --release) — nécessite cert Windows
-- ⬜ Sidecar sovereign-node-active embarqué dans le .exe
+- ✅ Build production fonctionnel (dist/ ~175KB JS + 5KB CSS)
+- ✅ Icônes app générées (cargo tauri icon) — 2026-06-04
+- ✅ Bundle .exe NSIS + MSI (`tauri build`) — 4.9 MB — 2026-06-04
+- ✅ Sidecar `sovereign-node-active` embarqué dans le .exe
+- ✅ Assistant installation : choix du rôle (Solo/Primary/Standby/Client)
+
+### 3.2bis Mode PME Solo (SQLite autonome) ✅ LIVRÉ 2026-06-04
+
+> Cible TPE mono-poste : tout-en-un sur SQLite, **zéro PostgreSQL**.
+
+- ✅ Binaire `sovereign-node-solo` — `crates/node/src/bin/solo_node.rs`
+  - ✅ Même API HTTP que l'actif (`/write`, `/stock`, `/journal`, `/epoch`)
+  - ✅ Métier + journal chiffré dans UNE base SQLite (atomicité préservée)
+  - ✅ Anti-survente, idempotence, journal chiffré, WAL + busy_timeout
+- ✅ Testé E2E : 7/7 (santé, stock, anti-survente, idempotence, journal, époque)
+- ✅ Persistance vérifiée (données conservées au redémarrage)
+- ✅ Embarqué dans le .exe + rôle "PME Solo" dans l'assistant
+- ✅ Redémarrage auto du nœud solo au relancement de l'app
 
 ### 3.3 Mobile UniFFI (Phase 3 avancée)
 

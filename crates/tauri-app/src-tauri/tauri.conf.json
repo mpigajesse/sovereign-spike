@@ -28,7 +28,8 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/sovereign-node-active"
+      "binaries/sovereign-node-active",
+      "binaries/sovereign-node-solo"
     ],
     "icon": [
       "icons/32x32.png",
@@ -39,6 +40,7 @@
     ],
     "resources": {
       "binaries/sovereign-node-active-x86_64-pc-windows-msvc.exe": "sovereign-node-active.exe",
+      "binaries/sovereign-node-solo-x86_64-pc-windows-msvc.exe": "sovereign-node-solo.exe",
       "../../../scripts/windows/03_setup_standby_win.ps1": "scripts/windows/03_setup_standby_win.ps1"
     }
   }

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type Role = "primary" | "standby" | "client";
+type Role = "solo" | "primary" | "standby" | "client";
 
 interface Props {
   onComplete: () => void;
@@ -25,7 +25,21 @@ export default function Install({ onComplete }: Props) {
     setLog([]);
 
     try {
-      if (role === "primary") {
+      if (role === "solo") {
+        // Mode PME solo : SQLite seul, aucun PostgreSQL requis
+        addLog("Mode PME Solo — aucun PostgreSQL requis");
+        addLog("Génération de la clé de chiffrement (DEK)...");
+        // DEK fixe pour le spike (en prod : générée + sauvegardée au coffre)
+        const dek = localStorage.getItem("sovereign_dek")
+          ?? "174835f0e063680d4b4652c7edf9472a1db0626388dbbe4342d84a7c9bce035b";
+        localStorage.setItem("sovereign_dek", dek);
+        addLog("Démarrage du nœud solo (SQLite)...");
+        const status = await invoke<{ message: string; active_url: string }>("start_solo_node", { dekHex: dek });
+        addLog(status.message);
+        localStorage.setItem("sovereign_role", "solo");
+        localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
+
+      } else if (role === "primary") {
         addLog("Vérification de PostgreSQL local...");
         const pgOk = await invoke<boolean>("check_pg_local");
         if (!pgOk) {
@@ -85,8 +99,17 @@ export default function Install({ onComplete }: Props) {
         <div style={{ fontSize: 26, fontWeight: 800, color: "var(--accent2)", marginBottom: 8 }}>Sovereign Data Agent</div>
         <div style={{ color: "var(--text-muted)", marginBottom: 48, fontSize: 14 }}>Première installation — choisissez le rôle de cette machine</div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 20, maxWidth: 900, width: "100%" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 16, maxWidth: 1100, width: "100%" }}>
           {[
+            {
+              id: "solo" as Role,
+              icon: "⬢",
+              title: "PME Solo",
+              subtitle: "Poste autonome",
+              desc: "Tout-en-un sur cette machine, sans serveur. Idéal pour une TPE avec un seul ordinateur.",
+              require: "Aucun prérequis — SQLite embarqué",
+              color: "var(--accent)",
+            },
             {
               id: "primary" as Role,
               icon: "◉",
@@ -155,12 +178,14 @@ export default function Install({ onComplete }: Props) {
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)", padding: 40 }}>
         <div style={{ maxWidth: 520, width: "100%" }}>
           <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 8 }}>
-            {role === "primary" ? "⬡ Configuration du nœud actif" :
+            {role === "solo"    ? "⬢ Configuration PME Solo" :
+             role === "primary" ? "⬡ Configuration du nœud actif" :
              role === "standby" ? "◎ Configuration du nœud standby" :
              "○ Configuration du poste client"}
           </div>
           <div style={{ color: "var(--text-muted)", marginBottom: 32, fontSize: 13 }}>
-            {role === "primary" ? "Cette machine sera le serveur principal de la PME." :
+            {role === "solo"    ? "Tout fonctionne sur cette machine, sans serveur ni configuration." :
+             role === "primary" ? "Cette machine sera le serveur principal de la PME." :
              role === "standby" ? "Cette machine répliquera le nœud actif et pourra prendre le relais." :
              "Cette machine se connectera au nœud actif via le réseau."}
           </div>
@@ -211,12 +236,22 @@ export default function Install({ onComplete }: Props) {
                 ✓ Le nœud actif démarrera automatiquement au lancement
               </div>
             )}
+
+            {role === "solo" && (
+              <div style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.7 }}>
+                ✓ Aucun PostgreSQL requis — base <code>SQLite</code> embarquée<br />
+                ✓ Chiffrement XChaCha20-Poly1305 + journal chiffré identiques<br />
+                ✓ Anti-survente et intégrité garantis (transaction SQLite unique)<br />
+                ✓ Données conservées localement entre les redémarrages
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
             <button className="btn btn-ghost" onClick={() => setStep("role")}>← Retour</button>
             <button className="btn btn-primary" style={{ flex: 1 }} onClick={startInstall}>
-              {role === "standby" ? "Configurer le standby" :
+              {role === "solo"    ? "Démarrer en mode solo" :
+               role === "standby" ? "Configurer le standby" :
                role === "primary" ? "Démarrer le nœud actif" :
                "Enregistrer et continuer"}
             </button>
@@ -250,7 +285,9 @@ export default function Install({ onComplete }: Props) {
       <div style={{ fontSize: 22, fontWeight: 700, marginTop: 16, marginBottom: 8 }}>Installation terminée</div>
       <div style={{ color: "var(--text-muted)", marginBottom: 32, fontSize: 14 }}>
         Rôle : <strong style={{ color: "var(--accent2)" }}>
-          {role === "primary" ? "Nœud Actif (Primary)" : role === "standby" ? "Nœud Standby" : "Poste Client"}
+          {role === "solo" ? "PME Solo (autonome)" :
+           role === "primary" ? "Nœud Actif (Primary)" :
+           role === "standby" ? "Nœud Standby" : "Poste Client"}
         </strong>
       </div>
       {log.map((l, i) => (

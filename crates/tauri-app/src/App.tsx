@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import Startup  from "./pages/Startup";
 import Install  from "./pages/Install";
 import Dashboard from "./pages/Dashboard";
@@ -17,24 +18,39 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "settings",  label: "Configuration",     icon: "⚙" },
 ];
 
-type AppState = "install" | "startup" | "ready";
+type AppState = "install" | "startup" | "solo-restart" | "ready";
 
 function getInitialState(): AppState {
   // Premier lancement : afficher l'assistant d'installation
   if (!localStorage.getItem("sovereign_installed")) return "install";
+  // Relancement en mode solo : il faut redémarrer le nœud solo embarqué
+  if (localStorage.getItem("sovereign_role") === "solo") return "solo-restart";
   return "startup";
 }
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
-  const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby">("remote");
+  const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
+
+  // Redémarrage automatique du nœud solo au relancement de l'app
+  useEffect(() => {
+    if (appState !== "solo-restart") return;
+    const dek = localStorage.getItem("sovereign_dek")
+      ?? "174835f0e063680d4b4652c7edf9472a1db0626388dbbe4342d84a7c9bce035b";
+    invoke("start_solo_node", { dekHex: dek })
+      .catch(() => { /* déjà démarré ou mode navigateur */ })
+      .finally(() => { setNodeMode("solo"); setAppState("ready"); });
+  }, [appState]);
 
   const handleInstallComplete = () => {
     const role = localStorage.getItem("sovereign_role") ?? "client";
-    if (role === "standby") {
+    if (role === "solo") {
+      setNodeMode("solo");
+      setAppState("ready"); // Le nœud solo a déjà été démarré par l'assistant
+    } else if (role === "standby") {
       setNodeMode("standby");
-      setAppState("ready"); // Standby n'a pas besoin de démarrer le nœud actif
+      setAppState("ready");
     } else {
       setAppState("startup");
     }
@@ -56,9 +72,18 @@ export default function App() {
   // ── Écrans de démarrage ──────────────────────────────────────────────────
   if (appState === "install")  return <Install  onComplete={handleInstallComplete} />;
   if (appState === "startup")  return <Startup  onReady={handleStartupReady} />;
+  if (appState === "solo-restart") return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)", gap: 20 }}>
+      <div style={{ fontSize: 48 }}>⬢</div>
+      <div style={{ fontSize: 18, fontWeight: 700 }}>Démarrage du nœud solo…</div>
+      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>SQLite local — sans serveur</div>
+      <div style={{ fontSize: 32 }}><span className="spin">↻</span></div>
+    </div>
+  );
 
   // ── Application principale ───────────────────────────────────────────────
-  const roleBadge = nodeMode === "local"   ? { label: "✓ Actif (primary)",  color: "green" }
+  const roleBadge = nodeMode === "solo"    ? { label: "⬢ PME Solo",          color: "green" }
+                  : nodeMode === "local"   ? { label: "✓ Actif (primary)",  color: "green" }
                   : nodeMode === "standby" ? { label: "◎ Standby",           color: "yellow" }
                   :                          { label: "○ Client",             color: "yellow" };
 

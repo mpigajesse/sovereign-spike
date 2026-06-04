@@ -151,6 +151,81 @@ async fn check_pg_local() -> bool {
     check_pg_available().await
 }
 
+/// Démarre le nœud SOLO (SQLite, sans PostgreSQL).
+/// Mode TPE/PME mono-poste : aucune dépendance serveur.
+#[tauri::command]
+async fn start_solo_node(
+    dek_hex: String,
+    state:   State<'_, NodeProcess>,
+    app:     tauri::AppHandle,
+) -> Result<StartupStatus, String> {
+    {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Ok(StartupStatus {
+                mode:       "solo".into(),
+                message:    "Nœud solo déjà en cours".into(),
+                active_url: "http://127.0.0.1:3000".into(),
+            });
+        }
+    }
+
+    // Trouver le binaire solo (sidecar embarqué)
+    let bin = find_solo_binary(&app).ok_or_else(||
+        "Binaire sovereign-node-solo introuvable dans le bundle".to_string())?;
+
+    // Base SQLite dans le dossier de données utilisateur (persistance)
+    let db_path = app.path().app_data_dir().ok()
+        .map(|d| { let _ = std::fs::create_dir_all(&d); d.join("sovereign_solo.db").to_string_lossy().to_string() })
+        .unwrap_or_else(|| "sovereign_solo.db".to_string());
+
+    let child = Command::new(&bin)
+        .env("SOLO_DB_PATH",      &db_path)
+        .env("LISTEN_ADDR",       "127.0.0.1:3000")
+        .env("SOVEREIGN_DEK_HEX", &dek_hex)
+        .spawn()
+        .map_err(|e| format!("Impossible de démarrer le nœud solo : {e}"))?;
+
+    {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(child);
+    }
+
+    // Attendre que le nœud réponde
+    for _ in 0..16 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if ping_node("http://127.0.0.1:3000").await {
+            return Ok(StartupStatus {
+                mode:       "solo".into(),
+                message:    "✓ Nœud solo démarré (SQLite, sans PostgreSQL)".into(),
+                active_url: "http://127.0.0.1:3000".into(),
+            });
+        }
+    }
+
+    Ok(StartupStatus {
+        mode:       "solo".into(),
+        message:    "Nœud solo lancé (démarrage en cours…)".into(),
+        active_url: "http://127.0.0.1:3000".into(),
+    })
+}
+
+fn find_solo_binary(app: &tauri::AppHandle) -> Option<String> {
+    if let Ok(res) = app.path().resource_dir() {
+        let p = res.join("sovereign-node-solo.exe");
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let p = exe.parent().unwrap_or(std::path::Path::new("."))
+            .join("sovereign-node-solo.exe");
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+    }
+    if Command::new("sovereign-node-solo").arg("--help").output().is_ok() {
+        return Some("sovereign-node-solo".into());
+    }
+    None
+}
+
 /// Exécute le script de configuration standby (embarqué dans le bundle).
 /// Le script PowerShell est copié dans un fichier temporaire puis exécuté.
 #[tauri::command]
@@ -347,6 +422,7 @@ pub fn run() {
             ping_health,
             check_pg_local,
             run_standby_setup,
+            start_solo_node,
         ])
         .run(tauri::generate_context!())
         .expect("Erreur lors du démarrage Tauri");
