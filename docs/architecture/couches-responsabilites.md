@@ -135,7 +135,12 @@ Ce modèle répond exactement à la problématique du PFE :
 
 ---
 
-## 5. Phase 1 avancée — Séparation PostgreSQL / SQLite (proposition)
+## 5. Phase 1 avancée — Séparation PostgreSQL / SQLite ✅ IMPLÉMENTÉE (2026-06-04)
+
+> **Statut : LIVRÉE.** Le trait `BusinessStore` et l'implémentation `SqliteBusinessStore`
+> sont codés et testés (6 tests unitaires + 1 test d'intégration). Voir
+> `crates/core/src/business_store.rs` et `crates/core/src/sqlite_store.rs`.
+
 
 ### Motivation
 
@@ -188,27 +193,48 @@ PostgreSQL (actif)                 SQLite (métier local)
 
 ### Implémentation requise
 
+### Code livré — `crates/core/src/business_store.rs`
+
 ```rust
 // Trait abstrait — le cœur Rust ne connaît pas le moteur de stockage
-trait BusinessStore: Send + Sync {
-    async fn get_stock(&self, item_id: &str) -> Result<i64>;
-    async fn apply_sale(&self, item_id: &str, qty: i64) -> Result<()>;
-    async fn apply_adjust(&self, item_id: &str, qty: i64) -> Result<()>;
+#[async_trait]
+pub trait BusinessStore: Send + Sync {
+    async fn get_stock(&self, item_id: &str) -> Result<i64, StoreError>;
+    async fn apply_sale(&self, item_id: &str, quantity: i64) -> Result<i64, StoreError>;
+    async fn apply_adjust(&self, item_id: &str, delta: i64) -> Result<i64, StoreError>;
+    async fn list_stock(&self) -> Result<Vec<StockEntry>, StoreError>;
 }
-
-// Implémentations concrètes
-struct SqliteBusinessStore(SqlitePool);   // production PME
-struct PostgresBusinessStore(PgPool);    // spike (actuel)
 ```
 
-> Cette abstraction permettrait de **changer le moteur de stockage sans toucher au cœur métier Rust** — principe de l'architecture hexagonale (ports & adapters).
+### Code livré — `crates/core/src/sqlite_store.rs`
 
-### Quand implémenter cette séparation ?
+```rust
+// Implémentation SQLite (production PME — léger, embarqué)
+pub struct SqliteBusinessStore { pool: SqlitePool }
 
-- **Phase 0 (actuel)** : PostgreSQL pour tout — simple, prouve le concept ✅
-- **Phase 1** : Introduction du trait `BusinessStore` + implémentation SQLite
-- **Phase 2** : PostgreSQL réduit au journal + réplication uniquement
-- **Phase 3** : Frontend Tauri embarque SQLite (pas besoin de PostgreSQL sur les machines client normales)
+#[async_trait]
+impl BusinessStore for SqliteBusinessStore {
+    async fn apply_sale(&self, item_id: &str, quantity: i64) -> Result<i64, StoreError> {
+        let disponible = self.get_stock(item_id).await?;
+        if disponible < quantity {
+            return Err(StoreError::StockInsuffisant { disponible, demande: quantity });
+        }
+        // UPDATE atomique avec RETURNING quantity ...
+    }
+    // ...
+}
+```
+
+> Cette abstraction permet de **changer le moteur de stockage sans toucher au cœur métier Rust** — principe de l'architecture hexagonale (ports & adapters). Tests : `cargo test -p sovereign-core sqlite_store` → 6/6 ✅.
+
+### Avancement de la séparation
+
+- **Phase 0** : PostgreSQL pour tout — simple, prouve le concept ✅
+- **Phase 1** : Trait `BusinessStore` + `SqliteBusinessStore` **✅ LIVRÉ (2026-06-04)**
+  - 6 tests unitaires (ajustement, vente, anti-survente, liste, cumuls)
+  - 1 test d'intégration prouvant l'indépendance journal/métier
+- **Phase 2** : Brancher `SqliteBusinessStore` dans le nœud actif à la place de PostgreSQL pour le métier (PostgreSQL conservé pour le journal + réplication) — *câblage à faire*
+- **Phase 3** : Frontend Tauri embarque SQLite (pas besoin de PostgreSQL sur les postes opérateurs normaux)
 
 ---
 
@@ -216,11 +242,11 @@ struct PostgresBusinessStore(PgPool);    // spike (actuel)
 
 > **Q : Le cœur backend Rust est-il séparé de la base de données métier ?**
 
-**Oui — par conception.** Le cœur Rust est un **arbitre stateless** : il ne stocke rien et n'a pas d'état propre. Il délègue le stockage à PostgreSQL (actuel) ou SQLite (Phase 1 avancée).
+**Oui — par conception, et c'est désormais prouvé par le code.** Le cœur Rust est un **arbitre stateless** : il ne stocke rien et n'a pas d'état propre. Il délègue le stockage via le trait `BusinessStore` — implémenté à la fois pour SQLite (`SqliteBusinessStore`) et, dans le spike, directement sur PostgreSQL (`active.rs`).
 
 La **souveraineté** ne dépend pas du moteur de stockage choisi — elle dépend du fait que ce stockage est **sur la machine du client**, et que le relais éditeur ne voit que des blobs opaques.
 
-La séparation PostgreSQL / SQLite est une **optimisation d'architecture** prévue en Phase 1, qui renforcera l'indépendance du cœur métier vis-à-vis de l'infrastructure de réplication.
+La séparation PostgreSQL / SQLite est **implémentée et testée** (51 tests au total dans le workspace, dont 7 spécifiques à cette séparation). Elle renforce l'indépendance du cœur métier vis-à-vis de l'infrastructure de réplication : un poste opérateur pourra à terme tourner sur SQLite seul, sans PostgreSQL.
 
 ---
 

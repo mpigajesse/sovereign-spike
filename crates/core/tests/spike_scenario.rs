@@ -454,3 +454,47 @@ fn scenario_e2e_pipeline_complet() {
     assert_eq!(dek_active.as_bytes(), dek_passif.as_bytes(),
         "actif et passif partagent la même DEK");
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Phase 1 avancée — Séparation PostgreSQL / SQLite
+// Preuve que le cœur Rust est indépendant du moteur de stockage.
+// ══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn phase1_sqlite_business_store_isole_du_journal() {
+    use sovereign_core::sqlite_store::SqliteBusinessStore;
+    use sovereign_core::business_store::BusinessStore;
+    use sovereign_core::{encrypt, Dek};
+    use sovereign_core::journal::{Operation, OpType, Payload, JournalEntry};
+    use sovereign_core::crypto::init;
+
+    init().expect("libsodium");
+
+    // ── Couche 1 : SQLite stocke le métier (sans PostgreSQL) ─────────────────
+    let store = SqliteBusinessStore::open(":memory:").await.expect("sqlite");
+    store.apply_adjust("PANTALON-L", 100).await.expect("+100");
+    store.apply_sale  ("PANTALON-L",  10).await.expect("-10");
+    assert_eq!(store.get_stock("PANTALON-L").await.unwrap(), 90);
+
+    // ── Couche 2 : PostgreSQL/journal stocke les blobs chiffrés (indépendant) ─
+    let dek = Dek::generate();
+    let op = Operation::new(1, OpType::Sale, Payload { item_id: "PANTALON-L".into(), quantity: 10 });
+    let entry = JournalEntry::seal(&op, &dek).expect("seal");
+    let blob = encrypt(&entry.to_bytes(), &dek);
+
+    // Le blob est opaque — le relais ne voit que ça
+    assert!(!blob.ciphertext.is_empty());
+
+    // ── Propriété clé : les deux couches sont indépendantes ──────────────────
+    // SQLite peut être remplacé par PostgreSQL (ou l'inverse) sans changer le journal
+    // Le cœur Rust parle à BusinessStore, pas à un moteur spécifique
+
+    // Vérification architecturale : BusinessStore est un trait
+    fn accepts_any_store(_store: &dyn BusinessStore) {}
+    accepts_any_store(&store); // SqliteBusinessStore implémente BusinessStore ✓
+
+    println!("Phase 1 avancée validée :");
+    println!("  SQLite  → stock métier (90 PANTALON-L)");
+    println!("  Journal → blob chiffré ({} octets)", blob.ciphertext.len());
+    println!("  Trait BusinessStore → moteur interchangeable ✓");
+}

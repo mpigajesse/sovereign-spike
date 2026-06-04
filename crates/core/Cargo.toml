@@ -4,15 +4,19 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
-sodiumoxide.workspace = true
-ciborium.workspace    = true
-serde.workspace       = true
-serde_bytes.workspace = true
-uuid.workspace        = true
-chrono.workspace      = true
-thiserror.workspace   = true
-hex.workspace         = true
-sha2.workspace        = true
+sodiumoxide.workspace  = true
+ciborium.workspace     = true
+serde.workspace        = true
+serde_bytes.workspace  = true
+uuid.workspace         = true
+chrono.workspace       = true
+thiserror.workspace    = true
+hex.workspace          = true
+sha2.workspace         = true
+async-trait.workspace  = true
+sqlx.workspace         = true
+tokio.workspace        = true
 
 [dev-dependencies]
-hex.workspace = true
+hex.workspace   = true
+tokio           = { workspace = true, features = ["macros", "rt"] }

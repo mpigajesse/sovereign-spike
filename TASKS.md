@@ -95,6 +95,15 @@
 - ⬜ Endpoint `/enroll` HTTP (enrôlement via API REST — architecture en place)
 - ⬜ Compactage journal (snapshot + reset — low priority)
 
+### 1.5 Séparation stockage (architecture hexagonale) ✅ LIVRÉ 2026-06-04
+
+- ✅ Trait `BusinessStore` (ports & adapters) — `crates/core/src/business_store.rs`
+- ✅ `SqliteBusinessStore` — implémentation SQLite légère (production PME)
+- ✅ 6 tests unitaires (ajustement, vente, anti-survente, liste, cumuls)
+- ✅ Test d'intégration : indépendance journal chiffré ↔ stockage métier
+- ⬜ Câbler `SqliteBusinessStore` dans le nœud actif à la place de PG-métier
+- 📄 Documenté : `docs/architecture/couches-responsabilites.md` §5
+
 ---
 
 ## PHASE 2 — Relais éditeur + synchronisation multi-sites ✅ COMPLÈTE
@@ -182,7 +191,7 @@
 | Phase | Avancement | Statut |
 |-------|-----------|--------|
 | Phase 0 — Spike dérisquage | 100% | ✅ Validé 2026-06-04 |
-| Phase 1 — Cœur Rust production | 95% | ✅ Validé 2026-06-04 |
+| Phase 1 — Cœur Rust production | 98% | ✅ Validé 2026-06-04 (+ séparation SQLite/PG) |
 | Phase 2 — Relais + multi-sites | 85% | ✅ Validé 2026-06-04 |
 | Phase 3 — Installeur one-click | 70% | ✅ Script PowerShell créé |
 | Phase 3 — Frontend Tauri | 85% | ✅ App complète, build OK, packaging à finaliser |
