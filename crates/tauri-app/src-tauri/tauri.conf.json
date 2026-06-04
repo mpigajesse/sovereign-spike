@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "identifier": "ma.albaraa.sovereign-data-agent",
   "build": {
-    "frontendDist": "../src",
+    "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
     "beforeBuildCommand": "npm run build"
@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:3000 http://192.168.200.130:3001 http://192.168.200.128:4000; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:* http://192.168.*:*; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {

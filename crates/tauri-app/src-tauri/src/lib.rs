@@ -10,7 +10,7 @@ use std::process::{Child, Command};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{Manager, State};
 
 // ── État de l'application ──────────────────────────────────────────────────────
 

@@ -3,14 +3,16 @@ import Dashboard from "./pages/Dashboard";
 import Stock from "./pages/Stock";
 import Journal from "./pages/Journal";
 import Securite from "./pages/Securite";
+import Settings from "./pages/Settings";
 
-type Page = "dashboard" | "stock" | "journal" | "securite";
+type Page = "dashboard" | "stock" | "journal" | "securite" | "settings";
 
 const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "dashboard", label: "Tableau de bord",  icon: "◈" },
   { id: "stock",     label: "Gestion du stock", icon: "⊟" },
   { id: "journal",   label: "Journal chiffré",  icon: "⊞" },
   { id: "securite",  label: "Sécurité",          icon: "⊡" },
+  { id: "settings",  label: "Configuration",     icon: "⚙" },
 ];
 
 export default function App() {
@@ -46,6 +48,7 @@ export default function App() {
         {page === "stock"     && <Stock />}
         {page === "journal"   && <Journal />}
         {page === "securite"  && <Securite />}
+        {page === "settings"  && <Settings />}
       </main>
     </div>
   );
