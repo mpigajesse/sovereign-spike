@@ -1,0 +1,204 @@
+# TASKS — Sovereign-Spike PFE Jesse MPIGA-ODOUMBA
+
+**Titre :** Conception et Implémentation d'une Architecture Coffre-Fort Data P2P Souveraine  
+**Étudiant :** Jesse MPIGA-ODOUMBA — EIGSI, Promo 2026  
+**Entreprise :** AL BARAA CONSULTING  
+**Dernière mise à jour :** 2026-06-04
+
+---
+
+## Légende
+
+- ✅ Terminé et validé
+- 🔄 En cours
+- ⬜ À faire
+- ❌ Bloqué / dépendance
+
+---
+
+## PHASE 0 — Spike de dérisquage ✅ COMPLÈTE
+
+> Objectif : prouver le socle technique avant tout code métier.
+
+### Crypto + Sérialisation
+
+- ✅ Chiffrement XChaCha20-Poly1305 via libsodium (crate `sodiumoxide`)
+- ✅ DEK (Data Encryption Key) symétrique par entreprise
+- ✅ Journal CBOR chiffré (crate `ciborium`) — blobs opaques hex
+- ✅ Nonce unique par opération
+- ✅ Idempotence via `op_id` UUID (déduplication des doublons réseau)
+
+### Réplication PostgreSQL
+
+- ✅ Nœud actif Windows 11 (PostgreSQL 18 primary, WAL level=replica)
+- ✅ Slot de réplication physique `sovereign_slot`
+- ✅ Rôle `replicator` configuré (pg_hba.conf + scram-sha-256)
+- ✅ Nœud passif Ubuntu 26.04 (pg_basebackup + hot_standby)
+- ✅ Streaming replication active (state=streaming, last_seq synchronisé)
+
+### Nœuds applicatifs Rust
+
+- ✅ `sovereign-node-active` — API HTTP (axum), écritures PostgreSQL, journal chiffré
+- ✅ `sovereign-node-passive` — sync journal toutes 5s, déchiffrement, SQLite local
+- ✅ `sovereign-relay` — relais aveugle (zero-knowledge, aucune DEK)
+- ✅ Époque de fencing (protection anti-split-brain au démarrage)
+
+### Invariants métier prouvés
+
+- ✅ Anti-survente (409 Conflict si stock insuffisant)
+- ✅ Idempotence op_id (seq identique si même op_id)
+- ✅ Cohérence actif ↔ passif (PANTALON-L = même quantité)
+- ✅ Zero-knowledge relais (blob opaque, aucun déchiffrement possible)
+
+### Tests
+
+- ✅ Test E2E 13/13 réussis (03_test_e2e.ps1)
+- ✅ Scripts d'installation Ubuntu (01, 02_setup_standby, 03_start_passive)
+- ✅ Scripts d'installation Kali (01_install_deps, 02_start_relay)
+- ✅ Documentation docs/install/ complète et à jour
+
+---
+
+## PHASE 1 — Cœur Rust production ⬜
+
+> Objectif : solidifier le cœur cryptographique et le journal avant le frontend.  
+> **Règle d'or : socle d'abord, métier ensuite.**
+
+### 1.1 Cryptographie
+
+- ⬜ Hiérarchie de clés complète :
+  - ⬜ Paire de clés X25519 par appareil
+  - ⬜ DEK emballée (sealed box) vers chaque appareil autorisé
+  - ⬜ Enrôlement d'un nouvel appareil sans exposer la DEK au relais
+- ⬜ Dérivation de clé depuis mot de passe (Argon2id)
+- ⬜ Rotation de la DEK (re-chiffrement du journal)
+- ⬜ Tests unitaires crypto (vectors NIST / libsodium)
+
+### 1.2 Journal CBOR
+
+- ⬜ Format de journal formalisé (schéma CBOR versionné)
+- ⬜ Replay du journal pour reconstruction de l'état
+- ⬜ Compactage du journal (snapshot + journal depuis le snapshot)
+- ⬜ Validation de l'intégrité (hash chaîné entre entrées)
+- ⬜ Tests : replay idempotent, hash chaîné inviolable
+
+### 1.3 Réplication PostgreSQL formalisée
+
+- ⬜ Bascule manuelle documentée et testée (promote standby → new primary)
+- ⬜ Époque de fencing incrémentée à chaque promotion
+- ⬜ Détection et blocage d'un ancien actif (epoch < current → reject writes)
+- ⬜ Test : arrêt actif → promotion Ubuntu → l'ancien actif est fencé
+
+### 1.4 API cœur
+
+- ⬜ Authentification par clé d'appareil (X25519)
+- ⬜ Endpoint `/enroll` — enrôler un nouvel appareil
+- ⬜ Endpoint `/failover` — déclencher une promotion manuelle
+- ⬜ Endpoint `/journal/compact` — snapshot + reset journal
+- ⬜ Tests d'intégration API (reqwest + PostgreSQL de test)
+
+---
+
+## PHASE 2 — Relais éditeur + synchronisation multi-sites ⬜
+
+> Objectif : permettre à la PME d'avoir plusieurs sites distants + sauvegarde hors-site chiffrée.
+
+### 2.1 Relais aveugle (production)
+
+- ⬜ Push automatique du journal chiffré vers le relais (depuis le nœud actif)
+- ⬜ Auth relais par `RELAY_API_KEY` (rotation via plan de contrôle)
+- ⬜ Fetch du journal depuis le relais (pour un site distant hors-ligne)
+- ⬜ Rétention et purge des anciens blobs (RELAY_MAX_BLOBS)
+- ⬜ Stockage persistant relais (SQLite ou PostgreSQL léger)
+
+### 2.2 Synchronisation multi-sites
+
+- ⬜ Site A (siège) : nœud actif + nœuds passifs
+- ⬜ Site B (agence) : nœud passif qui lit via relais quand coupé du siège
+- ⬜ Résolution de la partition réseau (site B reconecté → resynchronisation)
+- ⬜ Test : couper le réseau entre sites → site B reste en lecture → réseau rétabli → cohérence
+
+### 2.3 Plan de contrôle éditeur (minimal)
+
+- ⬜ Endpoint `/license` — vérification de validité de licence (format hors-ligne possible)
+- ⬜ Endpoint `/update` — distribution de mises à jour du binaire via relais
+- ⬜ Le relais ne voit que des paquets chiffrés (même pour les mises à jour)
+
+---
+
+## PHASE 3 — Frontend métier + installeur PME ⬜
+
+> Objectif : rendre la solution accessible à une PME sans informaticien.
+
+### 3.1 Installeur one-click (Windows)
+
+- ⬜ Script PowerShell `SouverainSetup.ps1` :
+  - ⬜ Télécharge et installe PostgreSQL 18 silencieusement
+  - ⬜ Génère la DEK automatiquement
+  - ⬜ Configure tout (pg_hba.conf, rôles, base, slot)
+  - ⬜ Crée un service Windows (démarrage automatique)
+  - ⬜ Ouvre le dashboard dans le navigateur
+- ⬜ Installeur graphique Tauri (Phase 3 avancée)
+
+### 3.2 Desktop Tauri (Windows + Linux)
+
+- ⬜ Scaffold application Tauri + React/TypeScript
+- ⬜ Intégration du cœur Rust via commandes Tauri
+- ⬜ Dashboard : stock en temps réel, journal, état de réplication
+- ⬜ UI gestion des appareils (enrôlement, révocation)
+- ⬜ Indicateur de mode (en ligne / hors-ligne / failover)
+- ⬜ Formulaires métier : ventes, ajustements stock
+
+### 3.3 Mobile UniFFI (Phase 3 avancée)
+
+- ⬜ Exposition du cœur Rust via UniFFI (bindings Swift/Kotlin)
+- ⬜ iOS : SwiftUI, lecture hors-ligne
+- ⬜ Android : Jetpack Compose, lecture hors-ligne
+
+---
+
+## Tâches transversales ⬜
+
+### Documentation
+
+- ⬜ Rapport PFE (rédaction finale)
+- ⬜ Diagrammes d'architecture (PlantUML / draw.io)
+- ⬜ Preuve formelle zéro-knowledge (section soutenance)
+- ✅ docs/install/ — guides de déploiement à jour
+
+### Soutenance EIGSI
+
+- ⬜ Slides de présentation (30 min)
+- ⬜ Démonstration live (3 nœuds, test E2E, failover)
+- ⬜ Réponses aux questions jury (crypto, CRDT vs sérialisation, coût PME)
+
+---
+
+## Résumé de progression
+
+| Phase | Avancement | Statut |
+|-------|-----------|--------|
+| Phase 0 — Spike dérisquage | 100% | ✅ Validé 2026-06-04 |
+| Phase 1 — Cœur Rust production | 0% | ⬜ À démarrer |
+| Phase 2 — Relais + multi-sites | 0% | ⬜ Dépend Phase 1 |
+| Phase 3 — Frontend Tauri + installeur | 0% | ⬜ Dépend Phase 2 |
+
+---
+
+## Prochaine tâche immédiate
+
+**Phase 1.3 — Bascule manuelle + fencing :**  
+Tester la promotion du standby Ubuntu en primary, incrémenter l'époque, et vérifier que l'ancien actif Windows est bloqué à l'époque inférieure.
+
+```bash
+# Sur Ubuntu — promouvoir le standby
+sudo -u postgres pg_ctl promote -D /var/lib/postgresql/18/main
+```
+
+```powershell
+# Sur Windows — vérifier que l'actif est fencé
+Invoke-RestMethod http://192.168.200.1:3000/write -Method POST `
+    -ContentType "application/json" `
+    -Body '{"op_type":"sale","item_id":"TEST","quantity":1}'
+# Attendu : 409 ou 503 (époque périmée)
+```
