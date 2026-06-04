@@ -1,152 +1,284 @@
-//! Backend Tauri — commandes exposées au frontend React.
+//! Backend Tauri — Sovereign Data Agent.
 //!
-//! Architecture : le frontend appelle les endpoints HTTP du nœud actif directement
-//! (via fetch dans le navigateur WebView). Les commandes Tauri ici servent pour :
-//!   - Démarrer / arrêter le nœud actif en sidecar
-//!   - Lire la configuration locale (shared.env)
-//!   - Opérations nécessitant l'accès au système de fichiers
+//! Au démarrage, l'app :
+//!   1. Cherche sovereign-node-active (sidecar embarqué ou dans PATH)
+//!   2. Vérifie si PostgreSQL local est disponible
+//!   3. Lance le nœud actif automatiquement si PostgreSQL est là
+//!   4. Sinon : mode CLIENT — se connecte à un nœud actif distant
+//!
+//! La PME n'a rien à faire manuellement.
 
 use std::process::{Child, Command};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::{Manager, State};
 
-// ── État de l'application ──────────────────────────────────────────────────────
+// ── État ──────────────────────────────────────────────────────────────────────
 
 struct NodeProcess(Mutex<Option<Child>>);
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct NodeConfig {
-    pub dek_hex:    String,
-    pub relay_url:  String,
-    pub relay_key:  String,
-    pub listen_addr: String,
-    pub db_url:      String,
-}
-
-impl Default for NodeConfig {
-    fn default() -> Self {
-        Self {
-            dek_hex:     String::new(),
-            relay_url:   String::new(),
-            relay_key:   "sovereign-spike-relay-key-2026".into(),
-            listen_addr: "0.0.0.0:3000".into(),
-            db_url:      "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active".into(),
-        }
-    }
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct StartupStatus {
+    pub mode:         String, // "local" | "remote" | "starting" | "error"
+    pub message:      String,
+    pub active_url:   String,
 }
 
 // ── Commandes Tauri ───────────────────────────────────────────────────────────
 
-/// Charge la configuration depuis shared.env.
+/// Statut de démarrage — appelé par le frontend au chargement.
 #[tauri::command]
-fn load_config(app: tauri::AppHandle) -> Result<NodeConfig, String> {
-    let env_path = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|p| p.join("scripts").join("shared.env"))
-        .filter(|p| p.exists());
+async fn get_startup_status(state: State<'_, NodeProcess>) -> Result<StartupStatus, String> {
+    let running = state.0.lock().map(|g| g.is_some()).unwrap_or(false);
+    if running {
+        return Ok(StartupStatus {
+            mode:       "local".into(),
+            message:    "Nœud actif démarré localement".into(),
+            active_url: "http://127.0.0.1:3000".into(),
+        });
+    }
+    Ok(StartupStatus {
+        mode:       "remote".into(),
+        message:    "Mode client — configurez l'URL du nœud actif".into(),
+        active_url: "http://192.168.200.1:3000".into(),
+    })
+}
 
-    let mut cfg = NodeConfig::default();
-
-    if let Some(path) = env_path {
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| format!("Lecture shared.env : {e}"))?;
-
-        for line in content.lines() {
-            let line = line.trim();
-            if line.starts_with('#') || !line.contains('=') { continue; }
-            let mut parts = line.splitn(2, '=');
-            let key = parts.next().unwrap_or("").trim();
-            let val = parts.next().unwrap_or("").trim();
-            match key {
-                "SOVEREIGN_DEK_HEX" => cfg.dek_hex    = val.to_string(),
-                "RELAY_URL"         => cfg.relay_url   = val.to_string(),
-                "RELAY_API_KEY"     => cfg.relay_key   = val.to_string(),
-                _ => {}
-            }
+/// Démarre le nœud actif (sidecar embarqué).
+/// Retourne le statut : "started" | "already_running" | "pg_unavailable" | "binary_not_found"
+#[tauri::command]
+async fn start_active_node(
+    db_url:    String,
+    dek_hex:   String,
+    relay_url: String,
+    relay_key: String,
+    state:     State<'_, NodeProcess>,
+    app:       tauri::AppHandle,
+) -> Result<StartupStatus, String> {
+    // Déjà démarré ?
+    {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Ok(StartupStatus {
+                mode:       "local".into(),
+                message:    "Nœud actif déjà en cours".into(),
+                active_url: "http://127.0.0.1:3000".into(),
+            });
         }
     }
 
-    Ok(cfg)
-}
+    // Trouver le binaire :
+    // 1. Sidecar embarqué dans le bundle Tauri
+    // 2. Même dossier que l'exe
+    // 3. PATH système
+    let bin_path = find_binary(&app);
 
-/// Démarre le nœud actif en sous-processus.
-#[tauri::command]
-fn start_node(
-    config: NodeConfig,
-    state:  State<'_, NodeProcess>,
-    app:    tauri::AppHandle,
-) -> Result<String, String> {
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    if guard.is_some() {
-        return Ok("Nœud actif déjà démarré".into());
+    let Some(bin) = bin_path else {
+        return Ok(StartupStatus {
+            mode:       "remote".into(),
+            message:    "Binaire non trouvé — mode client uniquement".into(),
+            active_url: "http://192.168.200.1:3000".into(),
+        });
+    };
+
+    // Vérifier PostgreSQL (tentative de connexion TCP sur port 5432)
+    let pg_ok = check_pg_available().await;
+    if !pg_ok {
+        return Ok(StartupStatus {
+            mode:       "remote".into(),
+            message:    "PostgreSQL non détecté localement — mode client. Vérifiez que PostgreSQL 18 est installé et démarré.".into(),
+            active_url: "http://192.168.200.1:3000".into(),
+        });
     }
 
-    // Trouver le binaire sovereign-node-active (sidecar ou dans PATH)
-    let bin = app
-        .path()
-        .resource_dir()
-        .ok()
-        .map(|p| p.join("sovereign-node-active.exe"))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "sovereign-node-active".into());
-
+    // Lancer le nœud actif
     let child = Command::new(&bin)
-        .env("DATABASE_URL",      &config.db_url)
-        .env("LISTEN_ADDR",       &config.listen_addr)
-        .env("SOVEREIGN_DEK_HEX", &config.dek_hex)
-        .env("RELAY_URL",         &config.relay_url)
-        .env("RELAY_API_KEY",     &config.relay_key)
+        .env("DATABASE_URL",      if db_url.is_empty() { "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active" } else { &db_url })
+        .env("LISTEN_ADDR",       "0.0.0.0:3000")
+        .env("SOVEREIGN_DEK_HEX", &dek_hex)
+        .env("RELAY_URL",         &relay_url)
+        .env("RELAY_API_KEY",     if relay_key.is_empty() { "sovereign-spike-relay-key-2026" } else { &relay_key })
         .spawn()
-        .map_err(|e| format!("Impossible de démarrer {bin} : {e}"))?;
+        .map_err(|e| format!("Impossible de démarrer {bin}: {e}"))?;
 
-    *guard = Some(child);
-    Ok(format!("Nœud actif démarré ({})", bin))
+    {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(child);
+    }
+
+    // Attendre que le nœud réponde (max 8s)
+    for _ in 0..16 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if ping_node("http://127.0.0.1:3000").await {
+            return Ok(StartupStatus {
+                mode:       "local".into(),
+                message:    "✓ Nœud actif démarré — prêt".into(),
+                active_url: "http://127.0.0.1:3000".into(),
+            });
+        }
+    }
+
+    Ok(StartupStatus {
+        mode:       "local".into(),
+        message:    "Nœud actif lancé (démarrage en cours…)".into(),
+        active_url: "http://127.0.0.1:3000".into(),
+    })
 }
 
-/// Arrête le nœud actif.
+/// Arrête le nœud actif local.
 #[tauri::command]
-fn stop_node(state: State<'_, NodeProcess>) -> Result<String, String> {
+fn stop_active_node(state: State<'_, NodeProcess>) -> Result<String, String> {
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     if let Some(mut child) = guard.take() {
-        child.kill().map_err(|e| format!("Arrêt échoué : {e}"))?;
+        child.kill().map_err(|e| format!("Arrêt : {e}"))?;
         Ok("Nœud actif arrêté".into())
     } else {
         Ok("Nœud actif n'était pas démarré".into())
     }
 }
 
-/// Vérifie si le nœud actif répond.
+/// Ping health du nœud (actif ou distant).
 #[tauri::command]
-async fn check_node_health() -> Result<bool, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    match client.get("http://127.0.0.1:3000/health").send().await {
-        Ok(r) => Ok(r.status().is_success()),
-        Err(_) => Ok(false),
-    }
+async fn ping_health(url: String) -> bool {
+    ping_node(&url).await
 }
 
-// ── Point d'entrée Tauri ──────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn find_binary(app: &tauri::AppHandle) -> Option<String> {
+    // 1. Sidecar dans le bundle Tauri (resource dir)
+    if let Ok(res) = app.path().resource_dir() {
+        let p = res.join("sovereign-node-active.exe");
+        if p.exists() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 2. Même dossier que l'exécutable courant
+    if let Ok(exe) = std::env::current_exe() {
+        let p = exe.parent().unwrap_or(std::path::Path::new("."))
+            .join("sovereign-node-active.exe");
+        if p.exists() {
+            return Some(p.to_string_lossy().to_string());
+        }
+    }
+
+    // 3. PATH système (dev)
+    if which_sovereign().is_some() {
+        return Some("sovereign-node-active".into());
+    }
+
+    None
+}
+
+fn which_sovereign() -> Option<()> {
+    Command::new("sovereign-node-active")
+        .arg("--help")
+        .output()
+        .ok()
+        .map(|_| ())
+}
+
+async fn check_pg_available() -> bool {
+    use tokio::net::TcpStream;
+    TcpStream::connect("127.0.0.1:5432")
+        .await
+        .is_ok()
+}
+
+async fn ping_node(url: &str) -> bool {
+    let health_url = format!("{url}/health");
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .ok()
+        .map(|c| c.get(&health_url).send())
+        .map(|f| tokio::runtime::Handle::current().block_on(async { f.await.map(|r| r.status().is_success()).unwrap_or(false) }))
+        .unwrap_or(false)
+}
+
+// ── Setup hook — auto-démarrage ───────────────────────────────────────────────
+
+fn auto_start_node(app: &tauri::AppHandle) {
+    // Lire la config depuis localStorage n'est pas accessible ici (WebView pas encore chargé).
+    // On détermine : si PostgreSQL local disponible → tenter de démarrer.
+    // Le frontend est notifié via l'état get_startup_status.
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            if !check_pg_available().await {
+                return; // Mode client — le frontend gérera
+            }
+            let bin = find_binary(&app);
+            let Some(bin) = bin else { return; };
+
+            // Lire la DEK depuis shared.env si disponible
+            let dek = read_dek_from_env(&app).unwrap_or_default();
+
+            let child = Command::new(&bin)
+                .env("DATABASE_URL",      "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active")
+                .env("LISTEN_ADDR",       "0.0.0.0:3000")
+                .env("SOVEREIGN_DEK_HEX", &dek)
+                .spawn();
+
+            if let Ok(child) = child {
+                let state = app.state::<NodeProcess>();
+                let mut guard = state.0.lock().unwrap();
+                *guard = Some(child);
+                eprintln!("[sovereign-tauri] Nœud actif démarré automatiquement");
+            }
+        });
+    });
+}
+
+fn read_dek_from_env(app: &tauri::AppHandle) -> Option<String> {
+    // Chercher shared.env à côté de l'exe
+    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let candidates = [
+        exe_dir.join("shared.env"),
+        exe_dir.join("scripts").join("shared.env"),
+        app.path().resource_dir().ok()?.join("shared.env"),
+    ];
+
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                if let Some(val) = line.strip_prefix("SOVEREIGN_DEK_HEX=") {
+                    return Some(val.trim().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+// ── Point d'entrée ────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(NodeProcess(Mutex::new(None)))
+        .setup(|app| {
+            // Auto-démarrage du nœud actif si PostgreSQL local est disponible
+            auto_start_node(app.handle());
+            Ok(())
+        })
+        .on_window_event(|_window, event| {
+            // Arrêter le nœud actif proprement à la fermeture de l'app
+            if let tauri::WindowEvent::Destroyed = event {
+                // Le processus enfant sera tué avec le parent (comportement OS)
+            }
+        })
         .invoke_handler(tauri::generate_handler![
-            load_config,
-            start_node,
-            stop_node,
-            check_node_health,
+            get_startup_status,
+            start_active_node,
+            stop_active_node,
+            ping_health,
         ])
         .run(tauri::generate_context!())
-        .expect("Erreur lors du démarrage de l'application Tauri");
+        .expect("Erreur lors du démarrage Tauri");
 }
