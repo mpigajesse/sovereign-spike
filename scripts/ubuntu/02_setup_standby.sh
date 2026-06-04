@@ -56,8 +56,7 @@ echo "OK"
 # ── pg_basebackup : copie du primary ─────────────────────────────────────────
 echo ""
 echo "[3/5] pg_basebackup depuis le primary ($PRIMARY_IP)..."
-echo "  (Entrer le mot de passe du rôle 'replicator' quand demandé : replicator_spike)"
-sudo -u postgres pg_basebackup \
+PGPASSWORD=replicator_spike sudo -E -u postgres pg_basebackup \
     -h "$PRIMARY_IP" \
     -p "$PRIMARY_PORT" \
     -U replicator \
