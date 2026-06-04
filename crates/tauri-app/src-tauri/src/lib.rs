@@ -145,6 +145,73 @@ async fn ping_health(url: String) -> bool {
     ping_node(&url).await
 }
 
+/// Vérifie si PostgreSQL est disponible localement (port 5432).
+#[tauri::command]
+async fn check_pg_local() -> bool {
+    check_pg_available().await
+}
+
+/// Exécute le script de configuration standby (embarqué dans le bundle).
+/// Le script PowerShell est copié dans un fichier temporaire puis exécuté.
+#[tauri::command]
+async fn run_standby_setup(primary_ip: String, app: tauri::AppHandle) -> Result<String, String> {
+    // Chercher le script embarqué dans les ressources Tauri
+    let script_content = find_standby_script(&app)?;
+
+    // Écrire dans un fichier temporaire
+    let tmp = std::env::temp_dir().join("sovereign_setup_standby.ps1");
+    std::fs::write(&tmp, &script_content)
+        .map_err(|e| format!("Impossible d'écrire le script temporaire : {e}"))?;
+
+    // Injecter l'IP du primary si fournie
+    let content_with_ip = script_content.replace(
+        r#"$PRIMARY_IP   = "192.168.200.1""#,
+        &format!(r#"$PRIMARY_IP   = "{primary_ip}""#),
+    );
+    std::fs::write(&tmp, content_with_ip)
+        .map_err(|e| format!("Erreur écriture script : {e}"))?;
+
+    // Exécuter PowerShell avec le script
+    let output = Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", tmp.to_str().unwrap_or(""),
+        ])
+        .output()
+        .map_err(|e| format!("Impossible de lancer PowerShell : {e}"))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        Ok(format!("Script terminé avec succès.\n{stdout}"))
+    } else {
+        Err(format!("Script échoué :\n{stderr}\n{stdout}"))
+    }
+}
+
+fn find_standby_script(app: &tauri::AppHandle) -> Result<String, String> {
+    // 1. Dans les ressources Tauri (bundle)
+    if let Ok(res) = app.path().resource_dir() {
+        let p = res.join("scripts").join("windows").join("03_setup_standby_win.ps1");
+        if p.exists() {
+            return std::fs::read_to_string(&p).map_err(|e| e.to_string());
+        }
+    }
+
+    // 2. Même dossier que l'exe
+    if let Ok(exe) = std::env::current_exe() {
+        let p = exe.parent().unwrap_or(std::path::Path::new("."))
+            .join("03_setup_standby_win.ps1");
+        if p.exists() {
+            return std::fs::read_to_string(&p).map_err(|e| e.to_string());
+        }
+    }
+
+    Err("Script de configuration standby non trouvé dans le bundle.".to_string())
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn find_binary(app: &tauri::AppHandle) -> Option<String> {
@@ -278,6 +345,8 @@ pub fn run() {
             start_active_node,
             stop_active_node,
             ping_health,
+            check_pg_local,
+            run_standby_setup,
         ])
         .run(tauri::generate_context!())
         .expect("Erreur lors du démarrage Tauri");
