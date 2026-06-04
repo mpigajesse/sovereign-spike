@@ -6,6 +6,18 @@
 //!   - Idempotence par op_id (UNIQUE constraint + vérification préalable)
 //!   - Opacité du journal (blobs XChaCha20-Poly1305, jamais de clair en base)
 //!   - Fencing anti-split-brain (EpochGuard — vérification dans la transaction)
+//!
+//! ── DÉCISION D'ARCHITECTURE (2026-06-04) ──────────────────────────────────────
+//! Ce nœud n'utilise PAS le trait `sovereign_core::BusinessStore` (SQLite), et c'est
+//! VOLONTAIRE. Le métier (stock) ET le journal chiffré sont écrits dans UNE SEULE
+//! transaction SERIALIZABLE PostgreSQL : la vérification anti-survente (étape stock)
+//! et l'écriture du journal sont indissociables. Les séparer dans deux bases
+//! (SQLite métier + PostgreSQL journal) casserait cette atomicité et exigerait un
+//! commit en deux phases (2PC) — complexe et faillible.
+//!
+//! `BusinessStore`/`SqliteBusinessStore` sont réservés aux contextes SANS arbitrage
+//! d'écritures concurrentes : nœud passif (rejeu d'un journal déjà ordonné) et mode
+//! PME solo (mono-poste). Détail : docs/architecture/couches-responsabilites.md §5bis.
 
 use std::sync::Arc;
 

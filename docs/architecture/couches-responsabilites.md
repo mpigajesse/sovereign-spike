@@ -233,8 +233,83 @@ impl BusinessStore for SqliteBusinessStore {
 - **Phase 1** : Trait `BusinessStore` + `SqliteBusinessStore` **✅ LIVRÉ (2026-06-04)**
   - 6 tests unitaires (ajustement, vente, anti-survente, liste, cumuls)
   - 1 test d'intégration prouvant l'indépendance journal/métier
-- **Phase 2** : Brancher `SqliteBusinessStore` dans le nœud actif à la place de PostgreSQL pour le métier (PostgreSQL conservé pour le journal + réplication) — *câblage à faire*
-- **Phase 3** : Frontend Tauri embarque SQLite (pas besoin de PostgreSQL sur les postes opérateurs normaux)
+- **Où le trait est utilisé** :
+  - Nœud **passif** → SQLite (réplique reconstruite depuis le journal) ✅
+  - Mode **PME solo / poste autonome** (futur) → SQLite seul, sans PostgreSQL
+  - Nœud **actif** → **reste sur PostgreSQL délibérément** (voir §5bis)
+
+---
+
+## 5bis. Décision d'architecture — Pourquoi le nœud actif NE migre PAS vers SQLite
+
+> ⚠️ **Décision actée (2026-06-04).** Le nœud actif conserve PostgreSQL pour le **métier
+> ET le journal dans une seule transaction**. On ne sépare PAS les deux sur l'actif.
+> Cette décision est volontaire et fondée sur la sécurité des invariants.
+
+### Le raisonnement
+
+Le nœud actif exécute aujourd'hui, dans **une seule transaction SERIALIZABLE PostgreSQL** :
+
+```
+BEGIN SERIALIZABLE
+  1. assert_primary()              -- fencing : époque locale == époque DB ?
+  2. SELECT quantity ... FOR UPDATE -- lecture verrouillée du stock
+  3. vérification stock ≥ quantité  -- invariant métier (anti-survente)
+  4. UPDATE stock ...               -- écriture de l'état métier
+  5. INSERT operations_journal ...  -- écriture du blob chiffré
+COMMIT   -- atomique : les 5 étapes réussissent ou échouent ENSEMBLE
+```
+
+**C'est cette atomicité qui garantit l'absence de survente sous concurrence.** La vérification de stock (étape 3) et l'écriture du journal (étape 5) sont indissociables.
+
+### Ce que la séparation SQLite/PostgreSQL casserait sur l'actif
+
+Si on plaçait le métier dans SQLite et le journal dans PostgreSQL :
+
+```
+Transaction SQLite      { vérifie stock, écrit stock }   -- base A
+Transaction PostgreSQL  { écrit le journal }              -- base B
+```
+
+→ **Deux transactions sur deux bases distinctes.** Entre les deux, une panne laisse un état incohérent :
+- stock décrémenté mais journal non écrit → la vente disparaît à la réplication
+- ou journal écrit mais stock non décrémenté → survente au prochain rejeu
+
+Restaurer l'atomicité exigerait un **commit en deux phases (2PC)** — un protocole de transaction distribuée **complexe et faillible**, exactement le type de mécanisme que le projet a voulu éviter (cf. document de cadrage §4.2 : « on n'écrit pas un consensus à la main »).
+
+### La règle générale
+
+| Atomicité | Coût | Fiabilité |
+| :--- | :--- | :--- |
+| **Intra-base** (une transaction, une base) | Gratuite | Infaillible (garantie par le moteur) |
+| **Inter-bases** (2PC) | Élevé | Faillible (cas limites nombreux) |
+
+> **Principe :** garder les opérations qui doivent être atomiques **dans la même base**. Le nœud actif arbitre les écritures → il a besoin de l'atomicité → il reste mono-base (PostgreSQL).
+
+### Où SQLite a sa place — sans ce problème
+
+| Nœud | Moteur | Atomicité requise entre stock et journal ? |
+| :--- | :--- | :--- |
+| **Actif** | PostgreSQL | ✅ **Oui** — il arbitre les écritures → mono-base obligatoire |
+| **Passif** | SQLite | ❌ Non — il **rejoue** un journal déjà ordonné, ne décide rien |
+| **PME solo** (futur) | SQLite | ❌ Non — un seul poste, pas de réplication, pas de journal séparé |
+
+Le nœud **passif** applique le stock et avance son pointeur `sync_state` dans **sa propre** transaction SQLite — mais il n'arbitre aucune écriture concurrente, donc aucun invariant métier n'est en jeu : la convergence vient de l'ordre du journal, pas d'un verrou.
+
+### Conclusion pour la soutenance
+
+> Le trait `BusinessStore` prouve que le cœur métier est **découplé** du moteur de stockage.
+> Mais le découplage n'oblige pas à séparer les bases **partout** : sur l'actif, garder
+> métier+journal dans une transaction PostgreSQL unique est **un choix de sécurité**, pas une
+> dette technique. On utilise SQLite là où l'atomicité inter-bases n'est pas en jeu (passif, solo).
+
+---
+
+## 5ter. Reste à faire — Mode PME solo (SQLite autonome)
+
+- **Phase 3** : Frontend Tauri embarque `SqliteBusinessStore` pour un **poste autonome**
+  (PME mono-poste sans PostgreSQL). Le trait est déjà prêt — il suffira de l'instancier
+  dans le backend Tauri pour un mode « démo / solo » qui ne dépend d'aucun serveur.
 
 ---
 
