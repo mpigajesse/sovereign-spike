@@ -38,8 +38,8 @@ echo "[3/5] Ajout du dépôt PostgreSQL officiel..."
 curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
     | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
 
-# Kali est basé sur Debian — utiliser 'bookworm' si lsb_release ne retourne pas le bon nom
-DISTRO=$(lsb_release -cs 2>/dev/null || echo "bookworm")
+# Kali retourne 'kali-rolling' mais PGDG n'a pas ce nom — forcer bookworm (base Debian)
+DISTRO="bookworm"
 echo "  Distribution : $DISTRO"
 
 echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt ${DISTRO}-pgdg main" \
