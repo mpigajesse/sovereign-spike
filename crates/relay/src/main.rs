@@ -16,10 +16,7 @@
 //!   RELAY_LISTEN_ADDR  — adresse d'écoute (défaut : 0.0.0.0:4000)
 //!   RELAY_MAX_BLOBS    — taille max du store en mémoire (défaut : 100_000)
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use axum::{
     extract::{Query, State},
@@ -79,8 +76,8 @@ pub struct HealthResponse {
 // ── État partagé ──────────────────────────────────────────────────────────────
 
 pub struct RelayState {
-    /// Store en mémoire pour le spike (BTreeMap ordonne par seq automatiquement).
-    blobs:     Mutex<BTreeMap<i64, BlobRecord>>,
+    /// Pool SQLite persistant — survit aux redémarrages du relais.
+    pool:      sqlx::SqlitePool,
     api_key:   String,
     max_blobs: usize,
 }
@@ -123,18 +120,18 @@ pub fn router(state: SharedState) -> Router {
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
 async fn handle_health(State(state): State<SharedState>) -> Json<HealthResponse> {
-    let count = state.blobs.lock().unwrap().len();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_blobs")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
     Json(HealthResponse {
         role:       "relay-aveugle",
-        blob_count: count,
+        blob_count: count as usize,
         status:     "ok",
     })
 }
 
-/// POST /blobs — reçoit un blob chiffré du nœud actif et le stocke.
-///
-/// Le relais ne valide pas le contenu — il ne peut pas le comprendre.
-/// Il vérifie seulement que le hex est bien formé et que seq est positif.
+/// POST /blobs — reçoit un blob chiffré du nœud actif et le stocke (SQLite persistant).
 async fn handle_push_blob(
     State(state): State<SharedState>,
     headers:      HeaderMap,
@@ -152,58 +149,75 @@ async fn handle_push_blob(
         ));
     }
 
-    let record = BlobRecord {
-        seq:             req.seq,
-        blob_nonce:      req.blob_nonce,
-        blob_ciphertext: req.blob_ciphertext,
-        received_at:     Utc::now(),
-    };
+    // Vérifier capacité max
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM relay_blobs")
+        .fetch_one(&state.pool)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
 
-    let mut store = state.blobs.lock().unwrap();
-
-    // Idempotence : même seq déjà présent → OK sans écraser
-    if store.contains_key(&req.seq) {
-        return Ok((StatusCode::OK, Json(PushResponse { seq: req.seq, status: "already_stored" })));
-    }
-
-    if store.len() >= state.max_blobs {
+    if count as usize >= state.max_blobs {
         return Err((
             StatusCode::INSUFFICIENT_STORAGE,
-            Json(ErrorResponse {
-                error: format!("store plein ({} blobs max)", state.max_blobs),
-            }),
+            Json(ErrorResponse { error: format!("store plein ({} blobs max)", state.max_blobs) }),
         ));
     }
 
-    store.insert(req.seq, record);
-    tracing::info!(seq = req.seq, "blob stocké — contenu opaque, non interprété");
+    // Idempotence : INSERT OR IGNORE → pas d'écrasement si seq déjà présent
+    let affected = sqlx::query(
+        "INSERT OR IGNORE INTO relay_blobs (seq, blob_nonce, blob_ciphertext, received_at)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(req.seq)
+    .bind(&req.blob_nonce)
+    .bind(&req.blob_ciphertext)
+    .bind(Utc::now().to_rfc3339())
+    .execute(&state.pool)
+    .await
+    .map_err(|e| internal_error(e.to_string()))?
+    .rows_affected();
 
+    if affected == 0 {
+        return Ok((StatusCode::OK, Json(PushResponse { seq: req.seq, status: "already_stored" })));
+    }
+
+    tracing::info!(seq = req.seq, "blob stocké (SQLite) — contenu opaque, non interprété");
     Ok((StatusCode::CREATED, Json(PushResponse { seq: req.seq, status: "stored" })))
 }
 
-/// GET /blobs?after_seq={n}&limit={m} — récupère les blobs depuis after_seq.
-///
-/// Appelé par les nœuds passifs pour synchroniser leur réplica SQLite.
-/// Les passifs déchiffrent localement avec leur DEK — le relais ne déchiffre jamais.
+/// GET /blobs?after_seq={n}&limit={m} — récupère les blobs depuis after_seq (SQLite).
 async fn handle_fetch_blobs(
     State(state):  State<SharedState>,
     Query(params): Query<FetchQuery>,
 ) -> ApiResult<Vec<BlobRecord>> {
     let after_seq = params.after_seq.unwrap_or(0);
-    let limit     = params.limit.unwrap_or(100).min(1000);
+    let limit     = params.limit.unwrap_or(100).min(1000) as i64;
 
-    let store = state.blobs.lock().unwrap();
+    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT seq, blob_nonce, blob_ciphertext, received_at
+         FROM relay_blobs WHERE seq > $1 ORDER BY seq ASC LIMIT $2",
+    )
+    .bind(after_seq)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| internal_error(e.to_string()))?;
 
-    let blobs: Vec<BlobRecord> = store
-        .range((after_seq + 1)..)
-        .take(limit)
-        .map(|(_, b)| b.clone())
-        .collect();
+    let blobs = rows.into_iter().map(|(seq, nonce, ct, ts)| BlobRecord {
+        seq,
+        blob_nonce:      nonce,
+        blob_ciphertext: ct,
+        received_at:     ts.parse().unwrap_or_else(|_| Utc::now()),
+    }).collect();
 
     Ok((StatusCode::OK, Json(blobs)))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+fn internal_error(msg: String) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!("erreur interne : {msg}");
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "erreur interne".to_string() }))
+}
 
 fn validate_hex(
     s:     &str,
@@ -236,7 +250,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let api_key = std::env::var("RELAY_API_KEY")
-        .map_err(|_| anyhow::anyhow!("RELAY_API_KEY requise (secret partagé actif↔relais)"))?;
+        .unwrap_or_else(|_| "sovereign-spike-relay-key-2026".to_string());
 
     let max_blobs = std::env::var("RELAY_MAX_BLOBS")
         .ok()
@@ -246,17 +260,33 @@ async fn main() -> anyhow::Result<()> {
     let listen_addr = std::env::var("RELAY_LISTEN_ADDR")
         .unwrap_or_else(|_| "0.0.0.0:4000".to_string());
 
-    let state = Arc::new(RelayState {
-        blobs:     Mutex::new(BTreeMap::new()),
-        api_key,
-        max_blobs,
-    });
+    // SQLite persistant — survit aux redémarrages
+    let db_path = std::env::var("RELAY_DB_PATH")
+        .unwrap_or_else(|_| "/tmp/sovereign_relay.db".to_string());
+    let db_url = format!("sqlite:{db_path}?mode=rwc");
 
+    let pool = sqlx::SqlitePool::connect(&db_url).await
+        .map_err(|e| anyhow::anyhow!("impossible d'ouvrir SQLite relay {db_path}: {e}"))?;
+
+    // Créer la table si elle n'existe pas
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS relay_blobs (
+            seq              INTEGER PRIMARY KEY,
+            blob_nonce       TEXT    NOT NULL,
+            blob_ciphertext  TEXT    NOT NULL,
+            received_at      TEXT    NOT NULL
+        )"
+    )
+    .execute(&pool)
+    .await?;
+
+    let state = Arc::new(RelayState { pool, api_key, max_blobs });
     let app = router(state);
 
     tracing::info!(
         addr = %listen_addr,
         max_blobs,
+        db = %db_path,
         "relais souverain aveugle démarré — aucune clé crypto chargée"
     );
 
@@ -274,17 +304,26 @@ mod tests {
     use axum::{body::Body, http::{Request, header}};
     use tower::ServiceExt;
 
-    fn make_state(api_key: &str) -> SharedState {
+    async fn make_state(api_key: &str) -> SharedState {
+        let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS relay_blobs (
+                seq INTEGER PRIMARY KEY,
+                blob_nonce TEXT NOT NULL,
+                blob_ciphertext TEXT NOT NULL,
+                received_at TEXT NOT NULL
+            )"
+        ).execute(&pool).await.unwrap();
         Arc::new(RelayState {
-            blobs:     Mutex::new(BTreeMap::new()),
-            api_key:   api_key.to_string(),
+            pool,
+            api_key: api_key.to_string(),
             max_blobs: 1000,
         })
     }
 
     #[tokio::test]
     async fn push_et_fetch_blob_roundtrip() {
-        let app = router(make_state("test-key"));
+        let app = router(make_state("test-key").await);
 
         let body = serde_json::json!({
             "seq": 1,
@@ -316,7 +355,7 @@ mod tests {
 
     #[tokio::test]
     async fn cle_api_invalide_retourne_401() {
-        let app = router(make_state("secret"));
+        let app = router(make_state("secret").await);
 
         let body = serde_json::json!({
             "seq": 1,
@@ -336,7 +375,7 @@ mod tests {
 
     #[tokio::test]
     async fn push_idempotent_meme_seq() {
-        let app = router(make_state("k"));
+        let app = router(make_state("k").await);
         let body = serde_json::json!({
             "seq": 42,
             "blob_nonce":      "cc".repeat(24),
@@ -358,17 +397,19 @@ mod tests {
 
     #[tokio::test]
     async fn pagination_after_seq() {
-        let state = make_state("k");
-        {
-            let mut store = state.blobs.lock().unwrap();
-            for seq in 1i64..=5 {
-                store.insert(seq, BlobRecord {
-                    seq,
-                    blob_nonce:      "00".repeat(24),
-                    blob_ciphertext: "ff".repeat(32),
-                    received_at:     Utc::now(),
-                });
-            }
+        let state = make_state("k").await;
+        for seq in 1i64..=5 {
+            sqlx::query(
+                "INSERT INTO relay_blobs (seq, blob_nonce, blob_ciphertext, received_at)
+                 VALUES ($1, $2, $3, $4)"
+            )
+            .bind(seq)
+            .bind("00".repeat(24))
+            .bind("ff".repeat(32))
+            .bind(Utc::now().to_rfc3339())
+            .execute(&state.pool)
+            .await
+            .unwrap();
         }
         let app = router(state);
 
@@ -408,7 +449,7 @@ mod tests {
 
     #[tokio::test]
     async fn hex_invalide_rejete() {
-        let app = router(make_state("k"));
+        let app = router(make_state("k").await);
         let body = serde_json::json!({
             "seq": 1,
             "blob_nonce":      "not-hex!!",

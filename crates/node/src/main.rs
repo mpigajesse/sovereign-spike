@@ -62,7 +62,13 @@ async fn main() -> anyhow::Result<()> {
     let epoch_guard = failover::EpochGuard::new(epoch);
     tracing::info!(epoch, "époque de fencing chargée");
 
-    let state = Arc::new(active::AppState { pool, dek, epoch_guard });
+    let relay_url = std::env::var("RELAY_URL").ok();
+    let relay_key = std::env::var("RELAY_API_KEY").ok();
+    if let Some(ref url) = relay_url {
+        tracing::info!(relay = %url, "push automatique vers le relais activé");
+    }
+
+    let state = Arc::new(active::AppState { pool, dek, epoch_guard, relay_url, relay_key });
     let app   = active::router(state);
 
     let listen_addr = std::env::var("LISTEN_ADDR")

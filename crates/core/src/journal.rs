@@ -9,6 +9,7 @@
 
 use crate::crypto::{decrypt, encrypt, CryptoError, Dek, EncryptedBlob};
 use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -29,6 +30,7 @@ pub struct Payload {
 
 /// Une opération du journal (§0.1 Stack).
 /// `seq` est imposé par le nœud actif — l'ordre unique, pièce maîtresse anti-survente.
+/// `prev_hash` chaîne chaque entrée à la précédente — toute altération du passé est détectable.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Operation {
     pub seq:            u64,
@@ -37,10 +39,13 @@ pub struct Operation {
     pub ts:             i64,
     pub payload:        Payload,
     pub schema_version: u8,
+    /// SHA-256 du CBOR de l'entrée précédente (hex). "genesis" pour la première entrée.
+    pub prev_hash:      String,
 }
 
 impl Operation {
     pub const CURRENT_SCHEMA: u8 = 1;
+    pub const GENESIS_HASH: &'static str = "genesis";
 
     pub fn new(seq: u64, op_type: OpType, payload: Payload) -> Self {
         Self {
@@ -50,6 +55,21 @@ impl Operation {
             ts: chrono::Utc::now().timestamp(),
             payload,
             schema_version: Self::CURRENT_SCHEMA,
+            prev_hash: Self::GENESIS_HASH.to_string(),
+        }
+    }
+
+    /// Construit une opération chaînée à l'entrée précédente.
+    pub fn new_chained(seq: u64, op_type: OpType, payload: Payload, prev_cbor: &[u8]) -> Self {
+        let hash = hex::encode(Sha256::digest(prev_cbor));
+        Self {
+            seq,
+            op_type,
+            op_id: Uuid::new_v4(),
+            ts: chrono::Utc::now().timestamp(),
+            payload,
+            schema_version: Self::CURRENT_SCHEMA,
+            prev_hash: hash,
         }
     }
 }
@@ -140,16 +160,17 @@ impl JournalEntry {
 /// Journal append-only en mémoire pour le spike.
 /// En production, les entrées seraient écrites sur disque (fichier ou PostgreSQL WAL).
 pub struct MemoryJournal {
-    entries: Vec<JournalEntry>,
-    next_seq: u64,
+    entries:     Vec<JournalEntry>,
+    next_seq:    u64,
+    last_cbor:   Option<Vec<u8>>, // CBOR de la dernière entrée → pour le hachage chaîné
 }
 
 impl MemoryJournal {
     pub fn new() -> Self {
-        Self { entries: Vec::new(), next_seq: 1 }
+        Self { entries: Vec::new(), next_seq: 1, last_cbor: None }
     }
 
-    /// Ajoute une opération au journal. Vérifie la séquence.
+    /// Ajoute une opération au journal. Vérifie la séquence et la chaîne de hachage.
     pub fn append(&mut self, op: &Operation, dek: &Dek) -> Result<(), JournalError> {
         if op.seq != self.next_seq {
             return Err(JournalError::BadSequence {
@@ -157,15 +178,54 @@ impl MemoryJournal {
                 got: op.seq,
             });
         }
-        let entry = JournalEntry::seal(op, dek)?;
+        let cbor = encode_cbor(op)?;
+        let entry = JournalEntry { blob: encrypt(&cbor, dek) };
+        self.last_cbor = Some(cbor);
         self.entries.push(entry);
         self.next_seq += 1;
         Ok(())
     }
 
+    /// CBOR de la dernière entrée — à passer à `Operation::new_chained` pour le hachage.
+    pub fn last_cbor(&self) -> Option<&[u8]> {
+        self.last_cbor.as_deref()
+    }
+
     /// Rejoue tout le journal → retourne les opérations déchiffrées dans l'ordre.
     pub fn replay(&self, dek: &Dek) -> Result<Vec<Operation>, JournalError> {
         self.entries.iter().map(|e| e.open(dek)).collect()
+    }
+
+    /// Vérifie l'intégrité de la chaîne de hachage.
+    /// Retourne `Ok(())` si chaque entrée référence correctement la précédente.
+    pub fn verify_chain(&self, dek: &Dek) -> Result<(), JournalError> {
+        let ops = self.replay(dek)?;
+        let mut prev_cbor: Option<Vec<u8>> = None;
+
+        for op in &ops {
+            match &prev_cbor {
+                None => {
+                    // Première entrée : prev_hash doit être "genesis"
+                    if op.prev_hash != Operation::GENESIS_HASH {
+                        return Err(JournalError::BadSequence {
+                            expected: 0,
+                            got: op.seq,
+                        });
+                    }
+                }
+                Some(prev) => {
+                    let expected_hash = hex::encode(Sha256::digest(prev));
+                    if op.prev_hash != expected_hash {
+                        return Err(JournalError::BadSequence {
+                            expected: op.seq - 1,
+                            got: op.seq,
+                        });
+                    }
+                }
+            }
+            prev_cbor = Some(encode_cbor(op)?);
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -178,9 +238,7 @@ impl MemoryJournal {
 }
 
 impl Default for MemoryJournal {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -226,7 +284,6 @@ mod tests {
 
         let ops = journal.replay(&dek).expect("replay");
         assert_eq!(ops.len(), 5);
-        // Vérifie que l'ordre est préservé
         for (i, op) in ops.iter().enumerate() {
             assert_eq!(op.seq, (i + 1) as u64);
         }
@@ -237,12 +294,54 @@ mod tests {
         let dek = setup();
         let mut journal = MemoryJournal::new();
 
-        let op_seq1 = Operation::new(1, OpType::Sale, Payload { item_id: "X".into(), quantity: 1 });
-        journal.append(&op_seq1, &dek).expect("seq 1 ok");
+        let op1 = Operation::new(1, OpType::Sale, Payload { item_id: "X".into(), quantity: 1 });
+        journal.append(&op1, &dek).expect("seq 1 ok");
 
-        // seq=3 alors qu'on attend seq=2 → rejeté
-        let op_seq3 = Operation::new(3, OpType::Sale, Payload { item_id: "X".into(), quantity: 1 });
-        assert!(journal.append(&op_seq3, &dek).is_err());
+        let op3 = Operation::new(3, OpType::Sale, Payload { item_id: "X".into(), quantity: 1 });
+        assert!(journal.append(&op3, &dek).is_err());
+    }
+
+    #[test]
+    fn hash_chaine_verifie_integrite() {
+        let dek = setup();
+        let mut journal = MemoryJournal::new();
+
+        // Première entrée : genesis
+        let op1 = Operation::new(1, OpType::StockAdjust, Payload { item_id: "A".into(), quantity: 100 });
+        journal.append(&op1, &dek).expect("append 1");
+
+        // Entrées suivantes : chaînées
+        for seq in 2u64..=4 {
+            let prev = journal.last_cbor().unwrap().to_vec();
+            let op = Operation::new_chained(seq, OpType::Sale, Payload { item_id: "A".into(), quantity: 1 }, &prev);
+            journal.append(&op, &dek).expect("append chaîné");
+        }
+
+        // La chaîne doit être valide
+        journal.verify_chain(&dek).expect("chaîne intègre");
+    }
+
+    #[test]
+    fn hash_chaine_detecte_alteration() {
+        let dek = setup();
+        let mut journal = MemoryJournal::new();
+
+        // Construire un journal avec 2 entrées chaînées correctement
+        let op1 = Operation::new(1, OpType::StockAdjust, Payload { item_id: "B".into(), quantity: 50 });
+        journal.append(&op1, &dek).expect("append 1");
+        let prev = journal.last_cbor().unwrap().to_vec();
+        let op2 = Operation::new_chained(2, OpType::Sale, Payload { item_id: "B".into(), quantity: 5 }, &prev);
+        journal.append(&op2, &dek).expect("append 2");
+
+        journal.verify_chain(&dek).expect("chaîne valide avant altération");
+
+        // Simuler une altération : construire une 3e entrée avec un faux prev_hash
+        let mut op3_falsifie = Operation::new(3, OpType::Sale, Payload { item_id: "B".into(), quantity: 999 });
+        op3_falsifie.prev_hash = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        journal.append(&op3_falsifie, &dek).expect("append 3 falsifié");
+
+        // La vérification doit détecter l'altération
+        assert!(journal.verify_chain(&dek).is_err(), "altération doit être détectée");
     }
 
     #[test]

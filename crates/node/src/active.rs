@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use serde_json;
 use sovereign_core::{
     encrypt,
     journal::{encode_cbor, Operation, OpType, Payload},
@@ -34,6 +35,10 @@ pub struct AppState {
     pub pool:        PgPool,
     pub dek:         Dek,
     pub epoch_guard: EpochGuard,
+    /// URL du relais éditeur (optionnel). Si None, le push est désactivé.
+    pub relay_url:   Option<String>,
+    /// Clé API pour le push vers le relais.
+    pub relay_key:   Option<String>,
 }
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
@@ -276,6 +281,17 @@ async fn handle_write(
 
     tracing::info!(seq, %op_id, item_id = %req.item_id, op_type = %req.op_type, "écriture sérialisée");
 
+    // Push asynchrone vers le relais (best-effort — ne bloque pas la réponse au client)
+    if let (Some(relay_url), Some(relay_key)) = (&state.relay_url, &state.relay_key) {
+        let relay_url = relay_url.clone();
+        let relay_key = relay_key.clone();
+        let nonce_hex   = hex::encode(&blob.nonce);
+        let ct_hex      = hex::encode(&blob.ciphertext);
+        tokio::spawn(async move {
+            push_to_relay(&relay_url, &relay_key, seq, &nonce_hex, &ct_hex).await;
+        });
+    }
+
     Ok((StatusCode::CREATED, Json(WriteResponse { seq, op_id, status: "committed" })))
 }
 
@@ -377,6 +393,35 @@ fn internal_error<E: std::fmt::Display>(e: E) -> (StatusCode, Json<ErrorResponse
 
 fn bad_request(msg: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg }))
+}
+
+/// Push best-effort d'un blob vers le relais éditeur aveugle.
+/// Les erreurs sont loguées mais n'affectent pas le flux principal.
+async fn push_to_relay(relay_url: &str, relay_key: &str, seq: i64, nonce_hex: &str, ct_hex: &str) {
+    let url = format!("{relay_url}/blobs");
+    let body = serde_json::json!({
+        "seq":             seq,
+        "blob_nonce":      nonce_hex,
+        "blob_ciphertext": ct_hex,
+    });
+    match reqwest::Client::new()
+        .post(&url)
+        .header("X-Relay-Key", relay_key)
+        .json(&body)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() || r.status().as_u16() == 200 => {
+            tracing::debug!(seq, "blob poussé vers le relais");
+        }
+        Ok(r) => {
+            tracing::warn!(seq, status = %r.status(), "push relais : réponse inattendue");
+        }
+        Err(e) => {
+            tracing::warn!(seq, error = %e, "push relais : échec (best-effort, ignoré)");
+        }
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
