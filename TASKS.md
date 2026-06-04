@@ -140,12 +140,17 @@
 
 ### 3.2 Desktop Tauri (Windows + Linux)
 
-- ⬜ Scaffold application Tauri + React/TypeScript
-- ⬜ Intégration du cœur Rust via commandes Tauri
-- ⬜ Dashboard : stock en temps réel, journal, état de réplication
-- ⬜ UI gestion des appareils (enrôlement, révocation)
-- ⬜ Indicateur de mode (en ligne / hors-ligne / failover)
-- ⬜ Formulaires métier : ventes, ajustements stock
+- ✅ Scaffold Tauri 2 + React/TypeScript + Vite — 2026-06-04
+- ✅ Backend Tauri (commandes : load_config, start_node, stop_node, check_health)
+- ✅ Dashboard : état 3 nœuds en temps réel, métriques, propriétés sécurité
+- ✅ Page Stock : vente / ajustement, consultation actif↔passif, cohérence
+- ✅ Page Journal : blobs chiffrés paginés, explication zéro-knowledge
+- ✅ Page Sécurité : fencing/époque, stack cryptographique, promote
+- ✅ UI design dark premium (CSS custom properties, sans framework CSS)
+- ✅ Build production fonctionnel (dist/ 159KB JS + 5KB CSS)
+- ⬜ Icônes app (icons/*.png) — à générer
+- ⬜ Bundle .exe signé (tauri build --release) — nécessite cert Windows
+- ⬜ Sidecar sovereign-node-active embarqué dans le .exe
 
 ### 3.3 Mobile UniFFI (Phase 3 avancée)
 
@@ -180,7 +185,7 @@
 | Phase 1 — Cœur Rust production | 95% | ✅ Validé 2026-06-04 |
 | Phase 2 — Relais + multi-sites | 85% | ✅ Validé 2026-06-04 |
 | Phase 3 — Installeur one-click | 70% | ✅ Script PowerShell créé |
-| Phase 3 — Frontend Tauri | 0% | ⬜ Architecture définie, implémentation à faire |
+| Phase 3 — Frontend Tauri | 85% | ✅ App complète, build OK, packaging à finaliser |
 | Phase 3 — Mobile UniFFI | 0% | ⬜ Architecture définie, hors-scope PFE immédiat |
 
 ---
