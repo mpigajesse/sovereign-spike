@@ -122,6 +122,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/journal",        get(handle_get_journal))
         .route("/epoch",          get(handle_get_epoch))
         .route("/epoch/promote",  post(handle_promote_epoch))
+        // CORS permissif : le tableau de bord Tauri (origine http://tauri.localhost)
+        // interroge ce nœud en cross-origin sur le LAN privé. Sans cet en-tête,
+        // le navigateur bloque la lecture de la réponse (dashboard "Hors ligne").
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
 }
 

@@ -114,6 +114,7 @@ pub fn router(state: SharedState) -> Router {
         .route("/health", get(handle_health))
         .route("/blobs",  post(handle_push_blob))
         .route("/blobs",  get(handle_fetch_blobs))
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
 }
 

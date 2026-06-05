@@ -148,6 +148,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/stock/:item_id", get(handle_get_stock))
         .route("/journal",        get(handle_get_journal))
         .route("/epoch",          get(handle_get_epoch))
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state);
 
     tracing::info!("nœud SOLO souverain (SQLite) en écoute sur {listen_addr}");
