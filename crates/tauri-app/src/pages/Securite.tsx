@@ -1,10 +1,60 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { api } from "../api";
+
+interface ClusterStatus {
+  role:              string;
+  in_recovery:       boolean;
+  sync_enabled:      boolean;
+  sync_state:        string;
+  standby_connected: boolean;
+}
 
 export default function Securite() {
   const [epoch,     setEpoch]     = useState<{ epoch: number; primary_host: string } | null>(null);
   const [promoting, setPromoting] = useState(false);
   const [alert,     setAlert]     = useState<{ type: "success" | "error"; msg: string } | null>(null);
+
+  // Administration cluster (machines avec PostgreSQL : primary / standby)
+  const role = localStorage.getItem("sovereign_role");
+  const hasPg = role === "primary" || role === "standby";
+  const [cluster, setCluster] = useState<ClusterStatus | null>(null);
+  const [busy,    setBusy]    = useState(false);
+
+  const loadCluster = useCallback(async () => {
+    if (!hasPg) return;
+    try { setCluster(await invoke<ClusterStatus>("cluster_status")); }
+    catch { setCluster(null); }
+  }, [hasPg]);
+
+  useEffect(() => {
+    loadCluster();
+    const t = setInterval(loadCluster, 5000);
+    return () => clearInterval(t);
+  }, [loadCluster]);
+
+  const toggleSync = async (sync: boolean) => {
+    setBusy(true); setAlert(null);
+    try {
+      const msg = await invoke<string>("set_replication_mode", { sync });
+      setAlert({ type: "success", msg: `✓ ${msg}` });
+      await loadCluster();
+    } catch (err: unknown) {
+      setAlert({ type: "error", msg: `✗ ${err instanceof Error ? err.message : String(err)}` });
+    } finally { setBusy(false); }
+  };
+
+  const doPromote = async () => {
+    if (!confirm("Promouvoir cette machine en PRIMARY ?\n\nÀ faire uniquement si le serveur actif est tombé. L'époque de fencing sera incrémentée pour neutraliser l'ancien primary.")) return;
+    setBusy(true); setAlert(null);
+    try {
+      const msg = await invoke<string>("promote_node");
+      setAlert({ type: "success", msg });
+      await loadCluster();
+    } catch (err: unknown) {
+      setAlert({ type: "error", msg: `✗ ${err instanceof Error ? err.message : String(err)}` });
+    } finally { setBusy(false); }
+  };
 
   const loadEpoch = async () => {
     try { setEpoch(await api.getEpoch()); } catch { setEpoch(null); }
@@ -31,6 +81,82 @@ export default function Securite() {
         <div className="page-title">Sécurité & Fencing</div>
         <div className="page-sub">Gestion de l'époque de fencing — protection contre le split-brain</div>
       </div>
+
+      {/* Administration du cluster — uniquement sur les machines avec PostgreSQL */}
+      {hasPg && (
+        <div className="card" style={{ marginBottom: 24 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Administration du cluster</div>
+          <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 16 }}>
+            Bascule et mode de réplication — opérations manuelles, sur décision de la PME.
+          </div>
+
+          {alert && <div className={`alert alert-${alert.type}`} style={{ marginBottom: 16 }}>{alert.msg}</div>}
+
+          {cluster ? (
+            <>
+              <div style={{ display: "flex", gap: 24, marginBottom: 20, flexWrap: "wrap" }}>
+                <div>
+                  <div className="card-label">Rôle de la base</div>
+                  <span className={`badge badge-${cluster.in_recovery ? "yellow" : "green"}`} style={{ marginTop: 6 }}>
+                    {cluster.in_recovery ? "◎ Standby (réplique)" : "✓ Primary (source de vérité)"}
+                  </span>
+                </div>
+                <div>
+                  <div className="card-label">Réplication</div>
+                  <span className={`badge badge-${cluster.sync_enabled ? "green" : "yellow"}`} style={{ marginTop: 6 }}>
+                    {cluster.sync_enabled ? "Synchrone" : "Asynchrone"}
+                  </span>
+                </div>
+                <div>
+                  <div className="card-label">Standby connecté</div>
+                  <div style={{ fontSize: 14, marginTop: 8, fontFamily: "monospace" }}>
+                    {cluster.in_recovery ? "—" : (cluster.standby_connected ? `oui (${cluster.sync_state})` : "aucun")}
+                  </div>
+                </div>
+              </div>
+
+              {/* Bouton mode de réplication (uniquement pertinent sur le primary) */}
+              {!cluster.in_recovery && (
+                <div style={{ marginBottom: 20 }}>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>Mode de réplication</div>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button
+                      className={cluster.sync_enabled ? "btn btn-primary" : "btn btn-ghost"}
+                      disabled={busy || cluster.sync_enabled}
+                      onClick={() => toggleSync(true)}
+                    >
+                      Passer en SYNCHRONE (zéro perte)
+                    </button>
+                    <button
+                      className={!cluster.sync_enabled ? "btn btn-primary" : "btn btn-ghost"}
+                      disabled={busy || !cluster.sync_enabled}
+                      onClick={() => toggleSync(false)}
+                    >
+                      Passer en ASYNCHRONE (rapide)
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Bouton de promotion (uniquement pertinent sur un standby) */}
+              {cluster.in_recovery && (
+                <div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+                    Bascule (failover) — à utiliser si le nœud actif est tombé
+                  </div>
+                  <button className="btn btn-danger" disabled={busy} onClick={doPromote}>
+                    {busy ? <span className="spin">↻</span> : "⬆ Promouvoir cette machine en PRIMARY"}
+                  </button>
+                </div>
+              )}
+            </>
+          ) : (
+            <div style={{ fontSize: 13, color: "var(--text-muted)" }}>
+              PostgreSQL local injoignable — impossible de lire l'état du cluster.
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Explication fencing */}
       <div style={{

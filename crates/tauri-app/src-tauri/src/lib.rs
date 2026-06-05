@@ -41,8 +41,10 @@ async fn get_startup_status(state: State<'_, NodeProcess>) -> Result<StartupStat
     }
     Ok(StartupStatus {
         mode:       "remote".into(),
+        // Aucune IP en dur : l'URL du nœud actif est saisie par l'utilisateur
+        // (Installation / Configuration) et lue côté frontend depuis localStorage.
         message:    "Mode client — configurez l'URL du nœud actif".into(),
-        active_url: "http://192.168.200.1:3000".into(),
+        active_url: String::new(),
     })
 }
 
@@ -79,7 +81,7 @@ async fn start_active_node(
         return Ok(StartupStatus {
             mode:       "remote".into(),
             message:    "Binaire non trouvé — mode client uniquement".into(),
-            active_url: "http://192.168.200.1:3000".into(),
+            active_url: String::new(),
         });
     };
 
@@ -89,7 +91,7 @@ async fn start_active_node(
         return Ok(StartupStatus {
             mode:       "remote".into(),
             message:    "PostgreSQL non détecté localement — mode client. Vérifiez que PostgreSQL 18 est installé et démarré.".into(),
-            active_url: "http://192.168.200.1:3000".into(),
+            active_url: String::new(),
         });
     }
 
@@ -170,58 +172,19 @@ pub struct DiscoveredNode {
     pub url:  String,
 }
 
-/// Détecte le sous-réseau LAN réel de la machine (ex: "192.168.200").
-/// Astuce : on "connecte" un socket UDP vers une IP du réseau VMnet1 ; aucun
-/// paquet n'est envoyé, mais l'OS choisit l'interface sortante, ce qui donne
-/// l'IP locale de cette interface (ex: 192.168.200.1). On exclut le loopback.
-fn detect_lan_subnet() -> Option<String> {
-    use std::net::UdpSocket;
-    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    // Cible VMnet1 ; route le socket vers l'interface 192.168.200.x sans trafic réel.
-    sock.connect("192.168.200.1:9").ok()?;
-    let ip = sock.local_addr().ok()?.ip().to_string();
-    if ip.starts_with("127.") {
-        return None;
-    }
-    let parts: Vec<&str> = ip.split('.').collect();
-    if parts.len() == 4 {
-        Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]))
-    } else {
-        None
-    }
-}
-
-/// Détecte l'IP LAN complète de cette machine (ex: "192.168.200.134"),
-/// pour afficher la vraie adresse du nœud au lieu de 127.0.0.1.
-fn detect_lan_ip() -> Option<String> {
-    use std::net::UdpSocket;
-    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("192.168.200.1:9").ok()?;
-    let ip = sock.local_addr().ok()?.ip().to_string();
-    if ip.starts_with("127.") { None } else { Some(ip) }
-}
-
-/// Renvoie l'IP LAN (VMnet1) de cette machine — None si introuvable (loopback).
-#[tauri::command]
-async fn get_lan_ip() -> Option<String> {
-    detect_lan_ip()
-}
-
-/// Découverte réseau : scanne le sous-réseau VMnet1 (192.168.200.0/24)
-/// pour trouver les nœuds souverains actifs, passifs et relais.
+/// Découverte réseau : scanne un sous-réseau /24 fourni par l'utilisateur
+/// (déduit de l'URL du nœud actif qu'il a saisie) pour trouver les nœuds.
 ///
-/// Conforme au document de cadrage §6 : la découverte locale automatique évite
-/// à la PME de saisir des adresses IP. (Le spike scanne au lieu d'utiliser mDNS,
-/// explicitement hors-périmètre Phase 0 §7.5 — même résultat ergonomique.)
+/// AUCUNE IP n'est codée en dur : si l'utilisateur n'a saisi aucune adresse,
+/// la découverte ne scanne rien (le mapping du parc est une donnée du client,
+/// cf. cadrage §6). Le spike scanne au lieu de mDNS (hors-périmètre §7.5).
 #[tauri::command]
 async fn discover_nodes(subnet: Option<String>) -> Vec<DiscoveredNode> {
-    // Ne JAMAIS scanner le loopback (127.x) : sous Windows tout 127.0.0.0/8 est
-    // du loopback et un noeud lie sur 0.0.0.0 repond sur chaque 127.0.0.x -> 254
-    // faux positifs. Si le sous-reseau demande est vide/loopback, on auto-detecte
-    // le vrai sous-reseau LAN de la machine (interface VMnet1).
+    // Ne jamais scanner le loopback. Sans sous-réseau fourni → rien à scanner
+    // (l'utilisateur saisit ses adresses manuellement).
     let base = match subnet {
         Some(s) if !s.is_empty() && !s.starts_with("127.") => s,
-        _ => detect_lan_subnet().unwrap_or_else(|| "192.168.200".to_string()),
+        _ => return Vec::new(),
     };
 
     // Ports et rôles à sonder
@@ -600,6 +563,117 @@ fn read_dek_from_env(app: &tauri::AppHandle) -> Option<String> {
     None
 }
 
+// ── Administration du cluster (failover manuel + mode de réplication) ──────────
+//
+// Ces commandes pilotent PostgreSQL via psql (couche base). Elles répondent à
+// deux besoins PME explicitement manuels (cf. cadrage §4.6 bascule manuelle) :
+//   - basculer un standby en primary (promotion) sur décision humaine ;
+//   - choisir le mode de réplication synchrone/asynchrone selon le besoin.
+// Aucune IP en dur : tout est local (127.0.0.1:5432, loopback de la machine).
+
+/// Localise psql.exe (chemins d'installation usuels de PostgreSQL sous Windows).
+fn find_psql() -> Option<String> {
+    for ver in ["18", "17", "16", "15"] {
+        let p = format!(r"C:\Program Files\PostgreSQL\{ver}\bin\psql.exe");
+        if std::path::Path::new(&p).exists() {
+            return Some(p);
+        }
+    }
+    if Command::new("psql").arg("--version").output().is_ok() {
+        return Some("psql".into());
+    }
+    None
+}
+
+/// Exécute une requête scalaire sur le PostgreSQL LOCAL et renvoie la valeur brute.
+fn psql_scalar(sql: &str) -> Result<String, String> {
+    let psql = find_psql().ok_or_else(|| "psql introuvable (PostgreSQL non installé ?)".to_string())?;
+    // Mot de passe superuser du spike (documenté, non-production).
+    let pw = std::env::var("SOVEREIGN_PG_ADMIN_PW").unwrap_or_else(|_| "admin".to_string());
+    let out = Command::new(&psql)
+        .env("PGPASSWORD", pw)
+        .args(["-h", "127.0.0.1", "-U", "postgres", "-d", "sovereign_active",
+               "-t", "-A", "-c", sql])
+        .output()
+        .map_err(|e| format!("exécution psql : {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClusterStatus {
+    pub role:              String, // "primary" | "standby"
+    pub in_recovery:       bool,
+    pub sync_enabled:      bool,   // synchronous_standby_names non vide
+    pub sync_state:        String, // "sync" | "async" | "aucun" | "n/a"
+    pub standby_connected: bool,
+}
+
+/// État du cluster vu depuis le PostgreSQL local (pour piloter les boutons).
+#[tauri::command]
+async fn cluster_status() -> Result<ClusterStatus, String> {
+    let in_recovery = psql_scalar("SELECT pg_is_in_recovery()")? == "t";
+    let ssn = psql_scalar("SHOW synchronous_standby_names").unwrap_or_default();
+    let sync_enabled = !ssn.trim().is_empty();
+
+    let (sync_state, standby_connected) = if in_recovery {
+        ("n/a".to_string(), false)
+    } else {
+        let st = psql_scalar(
+            "SELECT COALESCE(string_agg(DISTINCT sync_state, ','), '') FROM pg_stat_replication",
+        ).unwrap_or_default();
+        if st.is_empty() { ("aucun".to_string(), false) } else { (st, true) }
+    };
+
+    Ok(ClusterStatus {
+        role: if in_recovery { "standby".into() } else { "primary".into() },
+        in_recovery,
+        sync_enabled,
+        sync_state,
+        standby_connected,
+    })
+}
+
+/// Bascule le mode de réplication (bouton PME). `sync=true` → synchrone (zéro
+/// perte, plus lent) ; `sync=false` → asynchrone (rapide, perte possible au
+/// failover). `'*'` = n'importe quel standby (aucun nom de machine en dur).
+#[tauri::command]
+async fn set_replication_mode(sync: bool) -> Result<String, String> {
+    let val = if sync { "*" } else { "" };
+    psql_scalar(&format!("ALTER SYSTEM SET synchronous_standby_names = '{val}'"))?;
+    psql_scalar("SELECT pg_reload_conf()")?;
+    Ok(if sync {
+        "Réplication SYNCHRONE activée — chaque écriture attend l'accusé d'un standby (zéro perte).".into()
+    } else {
+        "Réplication ASYNCHRONE activée — écritures confirmées immédiatement (plus rapide, perte possible au failover).".into()
+    })
+}
+
+/// Promotion manuelle (bouton PME) : ce standby devient primary. Relâche la
+/// réplication synchrone (plus de standby rattaché) et incrémente l'époque de
+/// fencing pour neutraliser l'ancien primary (anti-split-brain).
+#[tauri::command]
+async fn promote_node() -> Result<String, String> {
+    if psql_scalar("SELECT pg_is_in_recovery()")? != "t" {
+        return Err("Cette machine est déjà primary (pas en réplication). Promotion inutile.".into());
+    }
+    psql_scalar("SELECT pg_promote(wait => true)")?;
+    // Relâcher la sync : le nouveau primary n'a pas encore de standby rattaché.
+    let _ = psql_scalar("ALTER SYSTEM SET synchronous_standby_names = ''");
+    let _ = psql_scalar("SELECT pg_reload_conf()");
+    // Incrémenter l'époque (fencing) — l'ancien primary deviendra obsolète.
+    let epoch = psql_scalar(
+        "UPDATE node_epoch SET epoch = epoch + 1, primary_host = 'promu-manuel', \
+         promoted_at = NOW() WHERE id = 1 RETURNING epoch",
+    )?;
+    Ok(format!(
+        "✓ Promotion réussie — cette machine est le nouveau primary (époque {epoch}). \
+         Démarrez le nœud actif si nécessaire."
+    ))
+}
+
 // ── Point d'entrée ────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -627,8 +701,10 @@ pub fn run() {
             run_standby_setup,
             start_solo_node,
             start_relay_node,
-            get_lan_ip,
             discover_nodes,
+            cluster_status,
+            set_replication_mode,
+            promote_node,
         ])
         .run(tauri::generate_context!())
         .expect("Erreur lors du démarrage Tauri");

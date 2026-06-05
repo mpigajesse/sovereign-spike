@@ -15,6 +15,10 @@ export default function Install({ onComplete }: Props) {
   // Vides par défaut : l'utilisateur saisit lui-même l'adresse du primary.
   const [primaryUrl, setPrimaryUrl] = useState("");
   const [primaryPg,  setPrimaryPg]  = useState("");
+  // IP de CETTE machine sur le réseau du cluster (saisie libre, aucune IP en dur).
+  const [selfIp,     setSelfIp]     = useState("");
+  // Mode de réplication choisi par la PME (primary) — modifiable ensuite.
+  const [syncMode,   setSyncMode]   = useState(true);
   const [log,        setLog]        = useState<string[]>([]);
   const [error,      setError]      = useState<string | null>(null);
 
@@ -80,10 +84,16 @@ export default function Install({ onComplete }: Props) {
           relayKey: "",
         });
         localStorage.setItem("sovereign_role", "primary");
-        // Afficher la vraie adresse LAN (ex. 192.168.200.1) plutôt que 127.0.0.1.
-        const lanIp = await invoke<string | null>("get_lan_ip").catch(() => null);
-        localStorage.setItem("sovereign_active_url", lanIp ? `http://${lanIp}:3000` : "http://127.0.0.1:3000");
-        addLog(`Nœud actif démarré ✓ (${lanIp ?? "127.0.0.1"}:3000)`);
+        // L'IP est saisie par l'utilisateur (aucune IP en dur). Vide → loopback.
+        const ip = bareHost(selfIp) || "127.0.0.1";
+        localStorage.setItem("sovereign_active_url", `http://${ip}:3000`);
+        localStorage.setItem("sovereign_self_ip", ip);
+        addLog(`Nœud actif démarré ✓ (${ip}:3000)`);
+        // Mode de réplication choisi par la PME (modifiable ensuite dans Sécurité)
+        try {
+          const msg = await invoke<string>("set_replication_mode", { sync: syncMode });
+          addLog(msg);
+        } catch { /* standby pas encore rattaché : sans effet immédiat */ }
 
       } else if (role === "standby") {
         addLog("Vérification de PostgreSQL local...");
@@ -107,9 +117,10 @@ export default function Install({ onComplete }: Props) {
         const status = await invoke<{ message: string }>("start_relay_node");
         addLog(status.message);
         localStorage.setItem("sovereign_role", "relais");
-        const lanIp = await invoke<string | null>("get_lan_ip").catch(() => null);
-        localStorage.setItem("sovereign_relay_url", lanIp ? `http://${lanIp}:4000` : "http://127.0.0.1:4000");
-        addLog(`Relais en ligne ✓ (${lanIp ?? "127.0.0.1"}:4000)`);
+        const ip = bareHost(selfIp) || "127.0.0.1";
+        localStorage.setItem("sovereign_relay_url", `http://${ip}:4000`);
+        localStorage.setItem("sovereign_self_ip", ip);
+        addLog(`Relais en ligne ✓ (${ip}:4000)`);
       }
 
       localStorage.setItem("sovereign_installed", "1");
@@ -258,6 +269,42 @@ export default function Install({ onComplete }: Props) {
                   </div>
                 )}
               </>
+            )}
+
+            {(role === "primary" || role === "relais") && (
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                  IP de cette machine sur le réseau du cluster <span style={{ opacity: 0.6 }}>· optionnel</span>
+                </label>
+                <input
+                  value={selfIp}
+                  onChange={e => setSelfIp(e.target.value)}
+                  style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                  placeholder="ex. 192.168.200.1"
+                />
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                  Adresse que les autres machines utiliseront pour joindre ce nœud. Laissez vide pour 127.0.0.1 (poste isolé).
+                </div>
+              </div>
+            )}
+
+            {role === "primary" && (
+              <div style={{ marginBottom: 20 }}>
+                <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+                  Mode de réplication
+                </label>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button type="button" className={syncMode ? "btn btn-primary" : "btn btn-ghost"} style={{ flex: 1 }} onClick={() => setSyncMode(true)}>
+                    Synchrone (zéro perte)
+                  </button>
+                  <button type="button" className={!syncMode ? "btn btn-primary" : "btn btn-ghost"} style={{ flex: 1 }} onClick={() => setSyncMode(false)}>
+                    Asynchrone (rapide)
+                  </button>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                  Synchrone : chaque écriture attend l'accusé d'un standby (aucune perte au failover). Modifiable ensuite dans Sécurité.
+                </div>
+              </div>
             )}
 
             {role === "primary" && (
