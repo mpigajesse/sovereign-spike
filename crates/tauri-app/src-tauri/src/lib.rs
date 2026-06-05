@@ -295,37 +295,39 @@ async fn run_standby_setup(primary_ip: String, app: tauri::AppHandle) -> Result<
     // Chercher le script embarqué dans les ressources Tauri
     let script_content = find_standby_script(&app)?;
 
-    // Écrire dans un fichier temporaire
+    // Injecter l'IP du primary fournie par l'utilisateur
+    let content = if !primary_ip.trim().is_empty() {
+        script_content.replace(
+            r#"$PRIMARY_IP   = "192.168.200.1""#,
+            &format!(r#"$PRIMARY_IP   = "{}""#, primary_ip.trim()),
+        )
+    } else {
+        script_content
+    };
+
+    // Écrire le fichier temporaire AVEC BOM UTF-8 pour que Windows PowerShell 5.1
+    // interprète correctement l'encodage (évite la corruption des caractères).
     let tmp = std::env::temp_dir().join("sovereign_setup_standby.ps1");
-    std::fs::write(&tmp, &script_content)
+    let mut bytes = vec![0xEF, 0xBB, 0xBF]; // BOM UTF-8
+    bytes.extend_from_slice(content.as_bytes());
+    std::fs::write(&tmp, &bytes)
         .map_err(|e| format!("Impossible d'écrire le script temporaire : {e}"))?;
 
-    // Injecter l'IP du primary si fournie
-    let content_with_ip = script_content.replace(
-        r#"$PRIMARY_IP   = "192.168.200.1""#,
-        &format!(r#"$PRIMARY_IP   = "{primary_ip}""#),
-    );
-    std::fs::write(&tmp, content_with_ip)
-        .map_err(|e| format!("Erreur écriture script : {e}"))?;
-
-    // Exécuter PowerShell avec le script
-    let output = Command::new("powershell")
+    // Lancer le script. Il s'auto-élève (UAC) : une fenêtre admin s'ouvrira et
+    // exécutera la configuration. On lance sans capturer (la fenêtre élevée est
+    // indépendante) et on rend la main immédiatement.
+    Command::new("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy", "Bypass",
             "-File", tmp.to_str().unwrap_or(""),
         ])
-        .output()
+        .spawn()
         .map_err(|e| format!("Impossible de lancer PowerShell : {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if output.status.success() {
-        Ok(format!("Script terminé avec succès.\n{stdout}"))
-    } else {
-        Err(format!("Script échoué :\n{stderr}\n{stdout}"))
-    }
+    Ok("Configuration lancée. Une fenêtre administrateur (UAC) va s'ouvrir : \
+        cliquez « Oui » et suivez la progression du pg_basebackup dans cette fenêtre. \
+        Revenez ensuite au tableau de bord.".to_string())
 }
 
 fn find_standby_script(app: &tauri::AppHandle) -> Result<String, String> {
