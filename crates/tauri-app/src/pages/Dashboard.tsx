@@ -19,6 +19,14 @@ export default function Dashboard() {
   const [relay,   setRelay]   = useState<NodeState>({ status: "loading" });
   const [stats,   setStats]   = useState<Stats>({ seq: null, epoch: null, lastSeq: null, blobs: null });
 
+  // URLs configurées (page Configuration) — affichées telles quelles
+  const urls = {
+    active:  localStorage.getItem("sovereign_active_url")  ?? "http://192.168.200.1:3000",
+    passive: localStorage.getItem("sovereign_passive_url") ?? "http://192.168.200.131:3001",
+    relay:   localStorage.getItem("sovereign_relay_url")   ?? "http://192.168.200.132:4000",
+  };
+  const shortUrl = (u: string) => u.replace(/^https?:\/\//, "");
+
   const refresh = useCallback(async () => {
     // Nœud actif
     api.healthActive()
@@ -79,11 +87,11 @@ export default function Dashboard() {
         <div className="page-sub">État du cluster souverain en temps réel — actualisation toutes les 5s</div>
       </div>
 
-      {/* Statut des 3 nœuds */}
+      {/* Statut des 3 nœuds — URLs lues depuis la configuration */}
       <div className="nodes-grid">
-        <NodeCard title="Nœud Actif"  url="localhost:3000"       state={active}  sub={stats.epoch !== null ? `Époque ${stats.epoch}` : undefined} />
-        <NodeCard title="Nœud Passif" url="192.168.200.130:3001" state={passive} sub={stats.lastSeq !== null ? `last_seq = ${stats.lastSeq}` : undefined} />
-        <NodeCard title="Relais"      url="192.168.200.128:4000" state={relay}   sub={stats.blobs !== null ? `${stats.blobs} blobs stockés` : undefined} />
+        <NodeCard title="Nœud Actif"  url={shortUrl(urls.active)}  state={active}  sub={stats.epoch !== null ? `Époque ${stats.epoch}` : undefined} />
+        <NodeCard title="Nœud Passif" url={shortUrl(urls.passive)} state={passive} sub={stats.lastSeq !== null ? `last_seq = ${stats.lastSeq}` : undefined} />
+        <NodeCard title="Relais"      url={shortUrl(urls.relay)}   state={relay}   sub={stats.blobs !== null ? `${stats.blobs} blobs stockés` : undefined} />
       </div>
 
       {/* Métriques */}

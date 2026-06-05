@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 
 const DEFAULTS = {
   active:  "http://192.168.200.1:3000",
-  passive: "http://192.168.200.130:3001",
-  relay:   "http://192.168.200.128:4000",
+  passive: "http://192.168.200.131:3001",
+  relay:   "http://192.168.200.132:4000",
 };
 
 interface DiscoveredNode {
@@ -130,23 +130,23 @@ export default function Settings() {
 
           <div>
             <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-              Nœud PASSIF (Ubuntu — standby)
+              Nœud PASSIF (Windows 11 — standby) <span style={{ opacity: 0.6 }}>· optionnel</span>
             </label>
             <input
               value={passive} onChange={e => setPassive(e.target.value)}
               style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "9px 12px", borderRadius: 7, fontSize: 13 }}
-              placeholder="http://192.168.200.130:3001"
+              placeholder="http://192.168.200.131:3001"
             />
           </div>
 
           <div>
             <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-              Relais aveugle (Kali — zero-knowledge)
+              Relais aveugle (zero-knowledge) <span style={{ opacity: 0.6 }}>· optionnel</span>
             </label>
             <input
               value={relay} onChange={e => setRelay(e.target.value)}
               style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "9px 12px", borderRadius: 7, fontSize: 13 }}
-              placeholder="http://192.168.200.128:4000"
+              placeholder="http://192.168.200.132:4000"
             />
           </div>
         </div>
@@ -166,9 +166,8 @@ export default function Settings() {
             <tbody>
               {[
                 ["Windows 11 (physique)", "192.168.200.1",   "3000", "Nœud actif (primary)"],
-                ["Ubuntu 26.04 VM",       "192.168.200.130", "3001", "Nœud passif (standby)"],
-                ["Kali Linux VM",         "192.168.200.128", "4000", "Relais aveugle"],
-                ["Windows 10 VM",         "192.168.200.x",   "—",    "Client (cette machine)"],
+                ["Windows 11 (VM 1)",     "192.168.200.131", "5432", "Nœud standby (failover)"],
+                ["Windows 11 (VM 2)",     "192.168.200.x",   "—",    "Poste client"],
               ].map(([m, ip, port, role]) => (
                 <tr key={ip}>
                   <td style={{ fontSize: 12 }}>{m}</td>

@@ -4,8 +4,8 @@
 function getConfig() {
   return {
     activeUrl:  localStorage.getItem("sovereign_active_url")  ?? "http://192.168.200.1:3000",
-    passiveUrl: localStorage.getItem("sovereign_passive_url") ?? "http://192.168.200.130:3001",
-    relayUrl:   localStorage.getItem("sovereign_relay_url")   ?? "http://192.168.200.128:4000",
+    passiveUrl: localStorage.getItem("sovereign_passive_url") ?? "http://192.168.200.131:3001",
+    relayUrl:   localStorage.getItem("sovereign_relay_url")   ?? "http://192.168.200.132:4000",
   };
 }
 
