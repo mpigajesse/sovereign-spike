@@ -19,7 +19,7 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "settings",  label: "Configuration",     icon: "⚙" },
 ];
 
-type AppState = "install" | "startup" | "solo-restart" | "primary-restart" | "ready";
+type AppState = "install" | "startup" | "solo-restart" | "primary-restart" | "relais-restart" | "ready";
 
 function getInitialState(): AppState {
   // Premier lancement : afficher l'assistant d'installation
@@ -30,6 +30,9 @@ function getInitialState(): AppState {
   // Relancement en mode primary : le nœud actif (process enfant) est mort
   // avec l'app précédente — il faut le relancer.
   if (role === "primary") return "primary-restart";
+  // Relancement en mode relais : le binaire relais (process enfant) est mort
+  // avec l'app précédente — il faut le relancer.
+  if (role === "relais") return "relais-restart";
   return "startup";
 }
 
@@ -37,7 +40,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
-  const [version,  setVersion]  = useState("0.1.4");
+  const [version,  setVersion]  = useState("0.1.5");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {
@@ -65,7 +68,10 @@ export default function App() {
       .then(status => {
         // Le nœud n'est "local" que s'il a vraiment démarré (PostgreSQL présent).
         if (status?.mode === "local") {
-          localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
+          // Ne pas écraser l'adresse LAN fixée à l'installation (ex. 192.168.200.1).
+          if (!localStorage.getItem("sovereign_active_url")) {
+            localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
+          }
           setNodeMode("local");
         } else {
           setNodeMode("remote"); // PG indisponible : on ne se prétend pas primary
@@ -73,6 +79,14 @@ export default function App() {
       })
       .catch(() => setNodeMode("remote") /* mode navigateur ou erreur */)
       .finally(() => setAppState("ready"));
+  }, [appState]);
+
+  // Redémarrage automatique du relais aveugle (rôle relais) au relancement.
+  useEffect(() => {
+    if (appState !== "relais-restart") return;
+    invoke("start_relay_node")
+      .catch(() => { /* déjà démarré ou mode navigateur */ })
+      .finally(() => { setNodeMode("remote"); setAppState("ready"); });
   }, [appState]);
 
   const handleInstallComplete = () => {
@@ -120,6 +134,14 @@ export default function App() {
       <div style={{ fontSize: 32 }}><span className="spin">↻</span></div>
     </div>
   );
+  if (appState === "relais-restart") return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)", gap: 20 }}>
+      <div style={{ fontSize: 48 }}>◇</div>
+      <div style={{ fontSize: 18, fontWeight: 700 }}>Démarrage du relais aveugle…</div>
+      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>Zero-knowledge — stockage de blobs chiffrés</div>
+      <div style={{ fontSize: 32 }}><span className="spin">↻</span></div>
+    </div>
+  );
 
   // ── Application principale ───────────────────────────────────────────────
   // Le badge reflète le RÔLE choisi à l'installation (source de vérité unique
@@ -128,6 +150,7 @@ export default function App() {
   const roleBadge = storedRole === "solo"    ? { label: "⬢ PME Solo",         color: "green" }
                   : storedRole === "primary" ? { label: "✓ Actif (primary)",  color: "green" }
                   : storedRole === "standby" ? { label: "◎ Standby",           color: "yellow" }
+                  : storedRole === "relais"  ? { label: "◇ Relais aveugle",    color: "green" }
                   :                            { label: "○ Client",            color: "yellow" };
 
   return (

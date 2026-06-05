@@ -191,6 +191,22 @@ fn detect_lan_subnet() -> Option<String> {
     }
 }
 
+/// Détecte l'IP LAN complète de cette machine (ex: "192.168.200.134"),
+/// pour afficher la vraie adresse du nœud au lieu de 127.0.0.1.
+fn detect_lan_ip() -> Option<String> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("192.168.200.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip().to_string();
+    if ip.starts_with("127.") { None } else { Some(ip) }
+}
+
+/// Renvoie l'IP LAN (VMnet1) de cette machine — None si introuvable (loopback).
+#[tauri::command]
+async fn get_lan_ip() -> Option<String> {
+    detect_lan_ip()
+}
+
 /// Découverte réseau : scanne le sous-réseau VMnet1 (192.168.200.0/24)
 /// pour trouver les nœuds souverains actifs, passifs et relais.
 ///
@@ -322,6 +338,79 @@ fn find_solo_binary(app: &tauri::AppHandle) -> Option<String> {
     }
     if Command::new("sovereign-node-solo").arg("--help").output().is_ok() {
         return Some("sovereign-node-solo".into());
+    }
+    None
+}
+
+/// Démarre le RELAIS aveugle (sovereign-relay) sur cette machine.
+/// Le relais ne détient AUCUNE clé : il ne stocke que des blobs chiffrés opaques
+/// (zero-knowledge par construction — cf. crates/relay, sans sovereign-core).
+#[tauri::command]
+async fn start_relay_node(
+    state: State<'_, NodeProcess>,
+    app:   tauri::AppHandle,
+) -> Result<StartupStatus, String> {
+    {
+        let guard = state.0.lock().map_err(|e| e.to_string())?;
+        if guard.is_some() {
+            return Ok(StartupStatus {
+                mode:       "relay".into(),
+                message:    "Relais déjà en cours".into(),
+                active_url: "http://127.0.0.1:4000".into(),
+            });
+        }
+    }
+
+    let bin = find_relay_binary(&app).ok_or_else(||
+        "Binaire sovereign-relay introuvable dans le bundle".to_string())?;
+
+    // Store SQLite persistant dans le dossier de données utilisateur
+    let db_path = app.path().app_data_dir().ok()
+        .map(|d| { let _ = std::fs::create_dir_all(&d); d.join("sovereign_relay.db").to_string_lossy().to_string() })
+        .unwrap_or_else(|| "sovereign_relay.db".to_string());
+
+    let child = Command::new(&bin)
+        .env("RELAY_LISTEN_ADDR", "0.0.0.0:4000")
+        .env("RELAY_API_KEY",     "sovereign-spike-relay-key-2026")
+        .env("RELAY_DB_PATH",     &db_path)
+        .spawn()
+        .map_err(|e| format!("Impossible de démarrer le relais : {e}"))?;
+
+    {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(child);
+    }
+
+    for _ in 0..16 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if ping_node("http://127.0.0.1:4000").await {
+            return Ok(StartupStatus {
+                mode:       "relay".into(),
+                message:    "✓ Relais aveugle démarré (zero-knowledge)".into(),
+                active_url: "http://127.0.0.1:4000".into(),
+            });
+        }
+    }
+
+    Ok(StartupStatus {
+        mode:       "relay".into(),
+        message:    "Relais lancé (démarrage en cours…)".into(),
+        active_url: "http://127.0.0.1:4000".into(),
+    })
+}
+
+fn find_relay_binary(app: &tauri::AppHandle) -> Option<String> {
+    if let Ok(res) = app.path().resource_dir() {
+        let p = res.join("sovereign-relay.exe");
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let p = exe.parent().unwrap_or(std::path::Path::new("."))
+            .join("sovereign-relay.exe");
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+    }
+    if Command::new("sovereign-relay").arg("--help").output().is_ok() {
+        return Some("sovereign-relay".into());
     }
     None
 }
@@ -537,6 +626,8 @@ pub fn run() {
             check_pg_local,
             run_standby_setup,
             start_solo_node,
+            start_relay_node,
+            get_lan_ip,
             discover_nodes,
         ])
         .run(tauri::generate_context!())

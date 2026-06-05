@@ -6,7 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 const EXAMPLES = {
   active:  "http://192.168.200.1:3000",
   passive: "http://192.168.200.133:3001",
-  relay:   "http://192.168.200.132:4000",
+  relay:   "http://192.168.200.134:4000",
 };
 
 interface DiscoveredNode {
@@ -179,8 +179,8 @@ export default function Settings() {
             <tbody>
               {[
                 ["Windows 11 (physique)", "192.168.200.1",   "3000", "Nœud actif (primary)"],
-                ["Windows 11 (VM 1)",     "192.168.200.131", "5432", "Nœud standby (failover)"],
-                ["Windows 11 (VM 2)",     "192.168.200.x",   "—",    "Poste client"],
+                ["Windows 11 (VM 1)",     "192.168.200.133", "5432", "Nœud standby (failover)"],
+                ["Windows 11 (VM 2)",     "192.168.200.134", "4000", "Relais aveugle (zero-knowledge)"],
               ].map(([m, ip, port, role]) => (
                 <tr key={ip}>
                   <td style={{ fontSize: 12 }}>{m}</td>

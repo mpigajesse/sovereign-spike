@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type Role = "solo" | "primary" | "standby" | "client";
+type Role = "solo" | "primary" | "standby" | "relais";
 
 interface Props {
   onComplete: () => void;
@@ -26,16 +26,16 @@ export default function Install({ onComplete }: Props) {
     s.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "");
 
   const startInstall = async () => {
-    // Validation des adresses saisies manuellement (standby / client)
-    if (role === "standby" || role === "client") {
+    // Validation des adresses saisies manuellement (standby uniquement)
+    if (role === "standby") {
       if (!primaryUrl.trim()) {
         setError("Saisissez l'URL du nœud actif (ex. http://192.168.200.1:3000).");
         return;
       }
-    }
-    if (role === "standby" && !primaryPg.trim()) {
-      setError("Saisissez l'IP PostgreSQL du primary (ex. 192.168.200.1).");
-      return;
+      if (!primaryPg.trim()) {
+        setError("Saisissez l'IP PostgreSQL du primary (ex. 192.168.200.1).");
+        return;
+      }
     }
 
     setStep("installing");
@@ -80,8 +80,10 @@ export default function Install({ onComplete }: Props) {
           relayKey: "",
         });
         localStorage.setItem("sovereign_role", "primary");
-        localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
-        addLog("Nœud actif démarré ✓");
+        // Afficher la vraie adresse LAN (ex. 192.168.200.1) plutôt que 127.0.0.1.
+        const lanIp = await invoke<string | null>("get_lan_ip").catch(() => null);
+        localStorage.setItem("sovereign_active_url", lanIp ? `http://${lanIp}:3000` : "http://127.0.0.1:3000");
+        addLog(`Nœud actif démarré ✓ (${lanIp ?? "127.0.0.1"}:3000)`);
 
       } else if (role === "standby") {
         addLog("Vérification de PostgreSQL local...");
@@ -99,10 +101,15 @@ export default function Install({ onComplete }: Props) {
         localStorage.setItem("sovereign_active_url", primaryUrl.trim());
 
       } else {
-        // Client — pas d'installation, juste la config URL
-        localStorage.setItem("sovereign_role", "client");
-        localStorage.setItem("sovereign_active_url", primaryUrl.trim());
-        addLog("Configuration client enregistrée ✓");
+        // Relais aveugle — lance le binaire relais (zero-knowledge, port 4000).
+        // Aucune clé, aucune donnée en clair : il ne stocke que des blobs opaques.
+        addLog("Démarrage du relais aveugle (zero-knowledge)...");
+        const status = await invoke<{ message: string }>("start_relay_node");
+        addLog(status.message);
+        localStorage.setItem("sovereign_role", "relais");
+        const lanIp = await invoke<string | null>("get_lan_ip").catch(() => null);
+        localStorage.setItem("sovereign_relay_url", lanIp ? `http://${lanIp}:4000` : "http://127.0.0.1:4000");
+        addLog(`Relais en ligne ✓ (${lanIp ?? "127.0.0.1"}:4000)`);
       }
 
       localStorage.setItem("sovereign_installed", "1");
@@ -153,13 +160,13 @@ export default function Install({ onComplete }: Props) {
               color: "var(--accent2)",
             },
             {
-              id: "client" as Role,
-              icon: "○",
-              title: "Poste Client",
-              subtitle: "Poste opérateur",
-              desc: "Se connecte au nœud actif via le réseau. Aucune installation de base de données requise.",
-              require: "Aucun prérequis",
-              color: "var(--text-muted)",
+              id: "relais" as Role,
+              icon: "◇",
+              title: "Relais aveugle",
+              subtitle: "Zero-knowledge (éditeur)",
+              desc: "Stocke les blobs chiffrés (sauvegarde hors-site). Ne détient aucune clé, ne voit jamais le clair — aveugle par construction.",
+              require: "Aucune base — port 4000",
+              color: "var(--accent2)",
             },
           ].map(r => (
             <div
@@ -205,19 +212,19 @@ export default function Install({ onComplete }: Props) {
             {role === "solo"    ? "⬢ Configuration PME Solo" :
              role === "primary" ? "⬡ Configuration du nœud actif" :
              role === "standby" ? "◎ Configuration du nœud standby" :
-             "○ Configuration du poste client"}
+             "◇ Configuration du relais aveugle"}
           </div>
           <div style={{ color: "var(--text-muted)", marginBottom: 32, fontSize: 13 }}>
             {role === "solo"    ? "Tout fonctionne sur cette machine, sans serveur ni configuration." :
              role === "primary" ? "Cette machine sera le serveur principal de la PME." :
              role === "standby" ? "Cette machine répliquera le nœud actif et pourra prendre le relais." :
-             "Cette machine se connectera au nœud actif via le réseau."}
+             "Cette machine hébergera le relais éditeur : il ne reçoit que du chiffré, jamais de clé."}
           </div>
 
           {error && <div className="alert alert-error" style={{ marginBottom: 20 }}>{error}</div>}
 
           <div className="card">
-            {(role === "standby" || role === "client") && (
+            {role === "standby" && (
               <>
                 <div style={{ marginBottom: 20 }}>
                   <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
@@ -269,6 +276,15 @@ export default function Install({ onComplete }: Props) {
                 ✓ Données conservées localement entre les redémarrages
               </div>
             )}
+
+            {role === "relais" && (
+              <div style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.7 }}>
+                ✓ Le relais démarre sur <code>0.0.0.0:4000</code> (joignable sur le LAN)<br />
+                ✓ Stocke des <strong>blobs chiffrés opaques</strong> — aucune clé, aucun clair<br />
+                ✓ Zero-knowledge par construction (ne dépend pas du cœur crypto)<br />
+                ✓ Le nœud actif (primary) y poussera ses sauvegardes automatiquement
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
@@ -277,7 +293,7 @@ export default function Install({ onComplete }: Props) {
               {role === "solo"    ? "Démarrer en mode solo" :
                role === "standby" ? "Configurer le standby" :
                role === "primary" ? "Démarrer le nœud actif" :
-               "Enregistrer et continuer"}
+               "Démarrer le relais aveugle"}
             </button>
           </div>
         </div>
@@ -311,7 +327,7 @@ export default function Install({ onComplete }: Props) {
         Rôle : <strong style={{ color: "var(--accent2)" }}>
           {role === "solo" ? "PME Solo (autonome)" :
            role === "primary" ? "Nœud Actif (Primary)" :
-           role === "standby" ? "Nœud Standby" : "Poste Client"}
+           role === "standby" ? "Nœud Standby" : "Relais aveugle"}
         </strong>
       </div>
       {log.map((l, i) => (
