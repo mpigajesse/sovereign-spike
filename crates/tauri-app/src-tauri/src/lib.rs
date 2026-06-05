@@ -560,22 +560,27 @@ pub struct ClusterStatus {
     pub sync_enabled:      bool,   // synchronous_standby_names non vide
     pub sync_state:        String, // "sync" | "async" | "aucun" | "n/a"
     pub standby_connected: bool,
+    pub standby_addr:      String, // IP du standby connecté (vu depuis le primary)
 }
 
-/// État du cluster vu depuis le PostgreSQL local (pour piloter les boutons).
+/// État du cluster vu depuis le PostgreSQL local (pour piloter les boutons et
+/// afficher la VRAIE santé du standby = réplication PG, pas un HTTP fantôme).
 #[tauri::command]
 async fn cluster_status() -> Result<ClusterStatus, String> {
     let in_recovery = psql_scalar("SELECT pg_is_in_recovery()")? == "t";
     let ssn = psql_scalar("SHOW synchronous_standby_names").unwrap_or_default();
     let sync_enabled = !ssn.trim().is_empty();
 
-    let (sync_state, standby_connected) = if in_recovery {
-        ("n/a".to_string(), false)
+    let (sync_state, standby_connected, standby_addr) = if in_recovery {
+        ("n/a".to_string(), false, String::new())
     } else {
         let st = psql_scalar(
             "SELECT COALESCE(string_agg(DISTINCT sync_state, ','), '') FROM pg_stat_replication",
         ).unwrap_or_default();
-        if st.is_empty() { ("aucun".to_string(), false) } else { (st, true) }
+        let addr = psql_scalar(
+            "SELECT COALESCE(string_agg(host(client_addr), ','), '') FROM pg_stat_replication",
+        ).unwrap_or_default();
+        if st.is_empty() { ("aucun".to_string(), false, String::new()) } else { (st, true, addr) }
     };
 
     Ok(ClusterStatus {
@@ -584,6 +589,7 @@ async fn cluster_status() -> Result<ClusterStatus, String> {
         sync_enabled,
         sync_state,
         standby_connected,
+        standby_addr,
     })
 }
 

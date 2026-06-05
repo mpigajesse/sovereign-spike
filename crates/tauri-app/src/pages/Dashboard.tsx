@@ -1,9 +1,19 @@
 import { useEffect, useState, useCallback } from "react";
-import { api } from "../api";
+import { invoke } from "@tauri-apps/api/core";
+import { api, canonicalUrl } from "../api";
 
 interface NodeState {
   status: "ok" | "down" | "loading" | "unset";
   detail?: string;
+}
+
+interface ClusterStatus {
+  role:              string;
+  in_recovery:       boolean;
+  sync_enabled:      boolean;
+  sync_state:        string;
+  standby_connected: boolean;
+  standby_addr:      string;
 }
 
 interface Stats {
@@ -19,24 +29,21 @@ export default function Dashboard() {
   const [relay,   setRelay]   = useState<NodeState>({ status: "loading" });
   const [stats,   setStats]   = useState<Stats>({ seq: null, epoch: null, lastSeq: null, blobs: null });
 
-  // URLs configurées (page Configuration) — vides tant que non saisies
+  // URLs configurées (page Configuration), normalisées au port canonique :
+  // actif → 3000, relais → 4000 (impossible de se tromper de port).
+  const [passiveLabel, setPassiveLabel] = useState("réplication PostgreSQL");
   const urls = {
-    active:  localStorage.getItem("sovereign_active_url")  ?? "",
-    passive: localStorage.getItem("sovereign_passive_url") ?? "",
-    relay:   localStorage.getItem("sovereign_relay_url")   ?? "",
+    active: canonicalUrl(localStorage.getItem("sovereign_active_url") ?? "", 3000),
+    relay:  canonicalUrl(localStorage.getItem("sovereign_relay_url")  ?? "", 4000),
   };
   const shortUrl = (u: string) => u ? u.replace(/^https?:\/\//, "") : "non configuré";
 
   const refresh = useCallback(async () => {
-    // On relit les URLs à chaque tick (l'utilisateur peut les changer sans reload)
-    const cfg = {
-      active:  localStorage.getItem("sovereign_active_url")  ?? "",
-      passive: localStorage.getItem("sovereign_passive_url") ?? "",
-      relay:   localStorage.getItem("sovereign_relay_url")   ?? "",
-    };
+    const activeCfg = canonicalUrl(localStorage.getItem("sovereign_active_url") ?? "", 3000);
+    const relayCfg  = canonicalUrl(localStorage.getItem("sovereign_relay_url")  ?? "", 4000);
 
     // Nœud actif — sauté si non configuré
-    if (!cfg.active) {
+    if (!activeCfg) {
       setActive({ status: "unset" });
     } else {
       api.healthActive()
@@ -52,21 +59,30 @@ export default function Dashboard() {
         .catch(() => {});
     }
 
-    // Nœud passif — sauté si non configuré
-    if (!cfg.passive) {
-      setPassive({ status: "unset" });
-    } else {
-      api.healthPassive()
-        .then(h => setPassive({ status: h.includes("passif") ? "ok" : "down", detail: h.trim() }))
-        .catch(() => setPassive({ status: "down" }));
-
-      api.syncStatus()
-        .then(s => setStats(prev => ({ ...prev, lastSeq: s.last_seq })))
-        .catch(() => {});
-    }
+    // Nœud PASSIF = réplique PostgreSQL (PAS un nœud HTTP). On lit l'état RÉEL
+    // de la réplication via cluster_status (pg_stat_replication sur le primary).
+    invoke<ClusterStatus>("cluster_status")
+      .then(cs => {
+        if (cs.in_recovery) {
+          // Cette machine EST le standby (réplique PG en lecture seule).
+          setPassive({ status: "ok" });
+          setPassiveLabel("cette machine (standby PG)");
+        } else if (cs.standby_connected) {
+          setPassive({ status: "ok", detail: cs.sync_state });
+          setPassiveLabel(`${cs.standby_addr} (PG ${cs.sync_state})`);
+        } else {
+          setPassive({ status: "unset" });
+          setPassiveLabel("aucun standby rattaché");
+        }
+      })
+      .catch(() => {
+        // Pas de PostgreSQL local (ex. machine relais) → non applicable ici.
+        setPassive({ status: "unset" });
+        setPassiveLabel("réplication PostgreSQL");
+      });
 
     // Relais — sauté si non configuré
-    if (!cfg.relay) {
+    if (!relayCfg) {
       setRelay({ status: "unset" });
     } else {
       api.healthRelay()
@@ -113,7 +129,7 @@ export default function Dashboard() {
       {/* Statut des 3 nœuds — URLs lues depuis la configuration */}
       <div className="nodes-grid">
         <NodeCard title="Nœud Actif"  url={shortUrl(urls.active)}  state={active}  sub={stats.epoch !== null ? `Époque ${stats.epoch}` : undefined} />
-        <NodeCard title="Nœud Passif" url={shortUrl(urls.passive)} state={passive} sub={stats.lastSeq !== null ? `last_seq = ${stats.lastSeq}` : undefined} />
+        <NodeCard title="Nœud Passif" url={passiveLabel}          state={passive} sub="réplication WAL synchrone" />
         <NodeCard title="Relais"      url={shortUrl(urls.relay)}   state={relay}   sub={stats.blobs !== null ? `${stats.blobs} blobs stockés` : undefined} />
       </div>
 

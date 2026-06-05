@@ -1,14 +1,26 @@
 // Client HTTP vers le nœud actif souverain (sovereign-node-active)
 // Les URLs sont lues depuis le localStorage (configurables depuis la page Settings)
 
+// Extrait l'hôte nu d'une saisie (retire schéma, port, chemin).
+export function hostOf(u: string): string {
+  return u.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "");
+}
+
+// Force le PORT CANONIQUE du service : l'actif tourne toujours sur 3000, le
+// relais toujours sur 4000 (ports fixés par les binaires). On normalise donc
+// la saisie utilisateur pour éliminer toute erreur de port (.134:3000 → .134:4000).
+export function canonicalUrl(u: string, port: number): string {
+  const h = hostOf(u);
+  return h ? `http://${h}:${port}` : "";
+}
+
 // Aucune adresse par défaut : la config est vide tant que l'utilisateur n'a
-// pas saisi/découvert ses propres adresses (ou que le démarrage n'a pas
-// auto-renseigné l'actif local en 127.0.0.1 sur la machine primary).
+// pas saisi/découvert ses propres adresses. Les ports sont normalisés.
 function getConfig() {
   return {
-    activeUrl:  localStorage.getItem("sovereign_active_url")  ?? "",
+    activeUrl:  canonicalUrl(localStorage.getItem("sovereign_active_url") ?? "", 3000),
     passiveUrl: localStorage.getItem("sovereign_passive_url") ?? "",
-    relayUrl:   localStorage.getItem("sovereign_relay_url")   ?? "",
+    relayUrl:   canonicalUrl(localStorage.getItem("sovereign_relay_url") ?? "", 4000),
   };
 }
 

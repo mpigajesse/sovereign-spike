@@ -1,12 +1,14 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { canonicalUrl } from "../api";
 
 // Exemples affichés en placeholder uniquement — les champs sont VIDES par
 // défaut : l'utilisateur saisit (ou découvre) ses propres adresses.
+// Le « Nœud Passif » n'est PAS une URL : c'est une réplique PostgreSQL
+// (port 5432), dont la santé est lue via pg_stat_replication, pas en HTTP.
 const EXAMPLES = {
-  active:  "http://192.168.200.1:3000",
-  passive: "http://192.168.200.133:3001",
-  relay:   "http://192.168.200.134:4000",
+  active: "http://192.168.200.1:3000",
+  relay:  "http://192.168.200.134:4000",
 };
 
 interface DiscoveredNode {
@@ -19,7 +21,6 @@ interface DiscoveredNode {
 export default function Settings() {
   // Champs VIDES par défaut : on ne lit que ce que l'utilisateur a déjà saisi.
   const [active,  setActive]  = useState(localStorage.getItem("sovereign_active_url")  ?? "");
-  const [passive, setPassive] = useState(localStorage.getItem("sovereign_passive_url") ?? "");
   const [relay,   setRelay]   = useState(localStorage.getItem("sovereign_relay_url")   ?? "");
   const [saved,   setSaved]   = useState(false);
 
@@ -34,16 +35,19 @@ export default function Settings() {
   };
 
   const save = () => {
-    persist("sovereign_active_url",  active);
-    persist("sovereign_passive_url", passive);
-    persist("sovereign_relay_url",   relay);
+    // Normalisation au port canonique : actif → 3000, relais → 4000.
+    const a = canonicalUrl(active, 3000);
+    const r = canonicalUrl(relay, 4000);
+    persist("sovereign_active_url", a);
+    persist("sovereign_relay_url",  r);
+    setActive(a); setRelay(r); // refléter la normalisation dans les champs
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   };
 
   // Vide les champs ET le storage — l'utilisateur repart d'une config vierge.
   const clearAll = () => {
-    setActive("");  setPassive("");  setRelay("");
+    setActive("");  setRelay("");
     localStorage.removeItem("sovereign_active_url");
     localStorage.removeItem("sovereign_passive_url");
     localStorage.removeItem("sovereign_relay_url");
@@ -63,7 +67,6 @@ export default function Settings() {
       // Pré-remplir automatiquement les champs depuis les nœuds trouvés
       for (const n of nodes) {
         if (n.role === "actif")  setActive(n.url);
-        if (n.role === "passif") setPassive(n.url);
         if (n.role === "relais") setRelay(n.url);
       }
     } catch {
@@ -141,15 +144,10 @@ export default function Settings() {
             </div>
           </div>
 
-          <div>
-            <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
-              Nœud PASSIF (Windows 11 — standby) <span style={{ opacity: 0.6 }}>· optionnel</span>
-            </label>
-            <input
-              value={passive} onChange={e => setPassive(e.target.value)}
-              style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "9px 12px", borderRadius: 7, fontSize: 13 }}
-              placeholder={`ex. ${EXAMPLES.passive}`}
-            />
+          <div style={{ fontSize: 12, color: "var(--text-muted)", background: "var(--surface2)", padding: "10px 12px", borderRadius: 7, lineHeight: 1.5 }}>
+            ℹ️ Le <strong>Nœud Passif</strong> (standby) n'a pas d'URL à saisir : c'est une
+            réplique <strong>PostgreSQL</strong> (port 5432). Sa santé est lue automatiquement
+            via la réplication (visible sur le tableau de bord et la page Sécurité).
           </div>
 
           <div>
