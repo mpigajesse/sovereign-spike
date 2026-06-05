@@ -198,14 +198,50 @@ Le client métier (app Tauri, ou tout autre logiciel) ne fait que des appels sim
 
 ---
 
-## 8. Ce que ça prouve pour la soutenance
+## 8. La question centrale à laquelle le moteur répond
 
-1. **La souveraineté est automatique.** L'opérateur ne fait que son métier ;
-   le démon protège les données en arrière-plan. Aucune compétence technique requise.
-2. **Le moteur est le vrai produit.** La couche métier (vente/stock) est volontairement
-   minimale — c'est une démonstration. La valeur est dans le démon souverain.
-3. **Séparation nette des responsabilités.** Métier = quoi faire ; Moteur = comment le
-   faire de façon souveraine. Les deux communiquent par une API simple.
+Le document de cadrage (§3.3) pose explicitement **la vraie question** du projet —
+et elle n'est **pas** cryptographique :
+
+> « comment **sérialiser les écritures** pour garantir les invariants, et comment
+> **faire basculer le serveur** sur une autre machine du client quand il tombe —
+> **sans perdre de données et sans que deux machines se croient simultanément
+> serveur** ? »
+
+Et le cadrage le martèle (§8) :
+
+> « Le vrai risque du projet n'est **pas cryptographique** mais **opérationnel** :
+> la sérialisation des écritures, la réplication synchrone, la bascule sans
+> split-brain ni retour piégeux de l'ancien actif (fencing), et la récupération
+> de clé. »
+
+### Pourquoi la crypto n'est PAS le défi
+
+La cryptographie est la **partie facile et résolue** : on s'appuie sur **libsodium**
+(XChaCha20-Poly1305, X25519, Argon2id) — on ne réimplémente **aucune** primitive.
+C'est une brique éprouvée qu'on assemble, pas un risque.
+
+### Le vrai défi = ce que le démon résout (le cœur du PFE)
+
+| Sous-problème opérationnel | Comment le démon le résout | Cas d'usage |
+| :--- | :--- | :--- |
+| **Sérialiser les écritures** (un seul écrivain, ordre unique) → pas de survente, numérotation continue | Nœud actif unique + transaction SERIALIZABLE + journal séquencé | UC-06 |
+| **Répliquer sans perte** | Réplication synchrone vers ≥ 1 passif ; confirmer seulement après réplication | UC-07 |
+| **Basculer quand le serveur tombe** | Promotion d'un standby (manuel à 2 machines, auto par quorum à ≥ 3) | UC-09 |
+| **Empêcher 2 serveurs simultanés** (split-brain) | Quorum + **jeton d'époque (fencing)** : l'ancien actif revenu est neutralisé | UC-10 |
+| **Récupérer la clé** (zéro-knowledge = qui perd sa clé perd tout) | Redondance multi-appareils + code de récupération (Argon2id) | UC-13 |
+
+### Ce que ça prouve pour la soutenance
+
+1. **Le moteur résout le problème opérationnel difficile** — sérialisation + failover
+   sans perte ni split-brain. C'est *le* risque que la Phase 0 devait dérisquer (§7.2),
+   et il est prouvé (13/13 tests E2E + fencing par époque).
+2. **La crypto est un moyen, pas le défi.** Elle protège le clair vis-à-vis du relais
+   éditeur, via libsodium — sans réinvention. Le document l'écarte explicitement comme
+   risque principal.
+3. **La couche métier est volontairement minimale.** Un compteur de stock + un numéroteur
+   suffisent à tester l'invariant fort (§7.3). La valeur est dans le moteur, pas dans la
+   richesse fonctionnelle — d'où le démon invisible derrière un métier trivial.
 
 ---
 
