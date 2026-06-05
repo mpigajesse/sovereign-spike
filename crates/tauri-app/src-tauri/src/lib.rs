@@ -160,6 +160,27 @@ pub struct DiscoveredNode {
     pub url:  String,
 }
 
+/// Détecte le sous-réseau LAN réel de la machine (ex: "192.168.200").
+/// Astuce : on "connecte" un socket UDP vers une IP du réseau VMnet1 ; aucun
+/// paquet n'est envoyé, mais l'OS choisit l'interface sortante, ce qui donne
+/// l'IP locale de cette interface (ex: 192.168.200.1). On exclut le loopback.
+fn detect_lan_subnet() -> Option<String> {
+    use std::net::UdpSocket;
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Cible VMnet1 ; route le socket vers l'interface 192.168.200.x sans trafic réel.
+    sock.connect("192.168.200.1:9").ok()?;
+    let ip = sock.local_addr().ok()?.ip().to_string();
+    if ip.starts_with("127.") {
+        return None;
+    }
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() == 4 {
+        Some(format!("{}.{}.{}", parts[0], parts[1], parts[2]))
+    } else {
+        None
+    }
+}
+
 /// Découverte réseau : scanne le sous-réseau VMnet1 (192.168.200.0/24)
 /// pour trouver les nœuds souverains actifs, passifs et relais.
 ///
@@ -168,7 +189,14 @@ pub struct DiscoveredNode {
 /// explicitement hors-périmètre Phase 0 §7.5 — même résultat ergonomique.)
 #[tauri::command]
 async fn discover_nodes(subnet: Option<String>) -> Vec<DiscoveredNode> {
-    let base = subnet.unwrap_or_else(|| "192.168.200".to_string());
+    // Ne JAMAIS scanner le loopback (127.x) : sous Windows tout 127.0.0.0/8 est
+    // du loopback et un noeud lie sur 0.0.0.0 repond sur chaque 127.0.0.x -> 254
+    // faux positifs. Si le sous-reseau demande est vide/loopback, on auto-detecte
+    // le vrai sous-reseau LAN de la machine (interface VMnet1).
+    let base = match subnet {
+        Some(s) if !s.is_empty() && !s.starts_with("127.") => s,
+        _ => detect_lan_subnet().unwrap_or_else(|| "192.168.200".to_string()),
+    };
 
     // Ports et rôles à sonder
     let probes: &[(u16, &str, &str)] = &[
