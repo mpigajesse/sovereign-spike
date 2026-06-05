@@ -42,6 +42,12 @@ export default function Install({ onComplete }: Props) {
     setError(null);
     setLog([]);
 
+    // Une (ré)installation repart d'une config propre : on efface les URLs
+    // passif/relais (qu'aucun rôle ne configure ici) pour éviter des valeurs
+    // périmées qui afficheraient "Hors ligne" au lieu de "Non configuré".
+    localStorage.removeItem("sovereign_passive_url");
+    localStorage.removeItem("sovereign_relay_url");
+
     try {
       if (role === "solo") {
         // Mode PME solo : SQLite seul, aucun PostgreSQL requis
