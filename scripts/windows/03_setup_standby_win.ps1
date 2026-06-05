@@ -131,16 +131,18 @@ Write-Host "[5/5] Configuration de postgresql.auto.conf..." -ForegroundColor Yel
 $autoconf = "$PG_DATA\postgresql.auto.conf"
 $conninfo = "host=$PRIMARY_IP port=$PRIMARY_PORT user=replicator password=replicator_spike application_name=$STANDBY_NAME"
 
-@"
-# Genere par sovereign-spike setup (Windows standby)
-primary_conninfo = '$conninfo'
-primary_slot_name = '$PG_SLOT'
-hot_standby = on
-hot_standby_feedback = on
-"@ | Set-Content $autoconf -Encoding UTF8
+# IMPORTANT : ecrire SANS BOM UTF-8. PostgreSQL refuse un BOM dans
+# postgresql.auto.conf ("erreur de syntaxe ligne 1"). Set-Content -Encoding UTF8
+# de PowerShell 5.1 ajoute un BOM -> on utilise .NET WriteAllText (UTF-8 sans BOM)
+# avec un contenu 100% ASCII.
+$autoconf_content = "primary_conninfo = '$conninfo'`n" +
+                    "primary_slot_name = '$PG_SLOT'`n" +
+                    "hot_standby = on`n" +
+                    "hot_standby_feedback = on`n"
+[System.IO.File]::WriteAllText($autoconf, $autoconf_content)
 
 New-Item -Path "$PG_DATA\standby.signal" -ItemType File -Force | Out-Null
-Write-Host "  standby.signal cree"
+Write-Host "  standby.signal cree (postgresql.auto.conf sans BOM)"
 
 # ---- Demarrer PostgreSQL en mode standby ------------------------------------
 Start-Service -Name "postgresql-x64-18"
