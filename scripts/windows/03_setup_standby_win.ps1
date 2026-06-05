@@ -135,10 +135,16 @@ $conninfo = "host=$PRIMARY_IP port=$PRIMARY_PORT user=replicator password=replic
 # postgresql.auto.conf ("erreur de syntaxe ligne 1"). Set-Content -Encoding UTF8
 # de PowerShell 5.1 ajoute un BOM -> on utilise .NET WriteAllText (UTF-8 sans BOM)
 # avec un contenu 100% ASCII.
+# Les parametres max_* DOIVENT etre >= ceux du primary, sinon le standby
+# refuse de demarrer ("restauration annulee a cause d'un parametrage insuffisant").
+# Le primary tourne avec max_wal_senders=10 -> on aligne ici.
 $autoconf_content = "primary_conninfo = '$conninfo'`n" +
                     "primary_slot_name = '$PG_SLOT'`n" +
                     "hot_standby = on`n" +
-                    "hot_standby_feedback = on`n"
+                    "hot_standby_feedback = on`n" +
+                    "max_wal_senders = 10`n" +
+                    "max_connections = 100`n" +
+                    "max_worker_processes = 8`n"
 [System.IO.File]::WriteAllText($autoconf, $autoconf_content)
 
 New-Item -Path "$PG_DATA\standby.signal" -ItemType File -Force | Out-Null
