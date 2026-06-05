@@ -37,7 +37,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
-  const [version,  setVersion]  = useState("0.1.2");
+  const [version,  setVersion]  = useState("0.1.3");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {
@@ -58,13 +58,18 @@ export default function App() {
   // Le binaire lit DATABASE_URL/DEK par défaut côté Rust (cf. start_active_node).
   useEffect(() => {
     if (appState !== "primary-restart") return;
-    invoke("start_active_node", { dbUrl: "", dekHex: "", relayUrl: "", relayKey: "" })
-      .catch(() => { /* déjà démarré, PG indisponible, ou mode navigateur */ })
-      .finally(() => {
-        localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
-        setNodeMode("local");
-        setAppState("ready");
-      });
+    invoke<{ mode: string }>("start_active_node", { dbUrl: "", dekHex: "", relayUrl: "", relayKey: "" })
+      .then(status => {
+        // Le nœud n'est "local" que s'il a vraiment démarré (PostgreSQL présent).
+        if (status?.mode === "local") {
+          localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
+          setNodeMode("local");
+        } else {
+          setNodeMode("remote"); // PG indisponible : on ne se prétend pas primary
+        }
+      })
+      .catch(() => setNodeMode("remote") /* mode navigateur ou erreur */)
+      .finally(() => setAppState("ready"));
   }, [appState]);
 
   const handleInstallComplete = () => {
@@ -114,10 +119,13 @@ export default function App() {
   );
 
   // ── Application principale ───────────────────────────────────────────────
-  const roleBadge = nodeMode === "solo"    ? { label: "⬢ PME Solo",          color: "green" }
-                  : nodeMode === "local"   ? { label: "✓ Actif (primary)",  color: "green" }
-                  : nodeMode === "standby" ? { label: "◎ Standby",           color: "yellow" }
-                  :                          { label: "○ Client",             color: "yellow" };
+  // Le badge reflète le RÔLE choisi à l'installation (source de vérité unique
+  // = sovereign_role), et non l'état d'exécution nodeMode qui peut diverger.
+  const storedRole = localStorage.getItem("sovereign_role");
+  const roleBadge = storedRole === "solo"    ? { label: "⬢ PME Solo",         color: "green" }
+                  : storedRole === "primary" ? { label: "✓ Actif (primary)",  color: "green" }
+                  : storedRole === "standby" ? { label: "◎ Standby",           color: "yellow" }
+                  :                            { label: "○ Client",            color: "yellow" };
 
   return (
     <div className="layout">
