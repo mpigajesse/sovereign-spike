@@ -37,7 +37,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
-  const [version,  setVersion]  = useState("0.1.3");
+  const [version,  setVersion]  = useState("0.1.4");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {
@@ -58,7 +58,10 @@ export default function App() {
   // Le binaire lit DATABASE_URL/DEK par défaut côté Rust (cf. start_active_node).
   useEffect(() => {
     if (appState !== "primary-restart") return;
-    invoke<{ mode: string }>("start_active_node", { dbUrl: "", dekHex: "", relayUrl: "", relayKey: "" })
+    // URL relais configurée (Configuration) prioritaire ; sinon défaut côté Rust
+    // (relais co-localisé http://127.0.0.1:4000) → push automatique permanent.
+    const relayUrl = localStorage.getItem("sovereign_relay_url") ?? "";
+    invoke<{ mode: string }>("start_active_node", { dbUrl: "", dekHex: "", relayUrl, relayKey: "" })
       .then(status => {
         // Le nœud n'est "local" que s'il a vraiment démarré (PostgreSQL présent).
         if (status?.mode === "local") {

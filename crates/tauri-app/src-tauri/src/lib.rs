@@ -93,12 +93,22 @@ async fn start_active_node(
         });
     }
 
+    // Défauts du spike : quand l'app relance le nœud actif (primary-restart),
+    // elle passe dek_hex/relay_url vides. On fournit donc des défauts pour que
+    //   - la DEK persistante du spike soit toujours utilisée (sinon le nœud ne
+    //     peut pas déchiffrer le journal existant) ;
+    //   - le push vers le relais aveugle soit automatique (relais co-localisé).
+    // Une valeur non vide (saisie en Configuration) reste prioritaire.
+    const SPIKE_DEK: &str = "174835f0e063680d4b4652c7edf9472a1db0626388dbbe4342d84a7c9bce035b";
+    let dek:   &str = if dek_hex.trim().is_empty()   { SPIKE_DEK }              else { dek_hex.as_str()   };
+    let relay: &str = if relay_url.trim().is_empty() { "http://127.0.0.1:4000" } else { relay_url.as_str() };
+
     // Lancer le nœud actif
     let child = Command::new(&bin)
         .env("DATABASE_URL",      if db_url.is_empty() { "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active" } else { &db_url })
         .env("LISTEN_ADDR",       "0.0.0.0:3000")
-        .env("SOVEREIGN_DEK_HEX", &dek_hex)
-        .env("RELAY_URL",         &relay_url)
+        .env("SOVEREIGN_DEK_HEX", dek)
+        .env("RELAY_URL",         relay)
         .env("RELAY_API_KEY",     if relay_key.is_empty() { "sovereign-spike-relay-key-2026" } else { &relay_key })
         .spawn()
         .map_err(|e| format!("Impossible de démarrer {bin}: {e}"))?;

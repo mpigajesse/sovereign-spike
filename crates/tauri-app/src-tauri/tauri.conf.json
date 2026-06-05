@@ -1,6 +1,6 @@
 {
   "productName": "Sovereign Data Agent",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "identifier": "ma.albaraa.sovereign-data-agent",
   "build": {
     "frontendDist": "../dist",

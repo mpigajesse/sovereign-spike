@@ -62,7 +62,8 @@ async fn main() -> anyhow::Result<()> {
     let epoch_guard = failover::EpochGuard::new(epoch);
     tracing::info!(epoch, "époque de fencing chargée");
 
-    let relay_url = std::env::var("RELAY_URL").ok();
+    // RELAY_URL vide ⇒ pas de relais (évite un push vers une URL "/blobs" invalide).
+    let relay_url = std::env::var("RELAY_URL").ok().filter(|s| !s.trim().is_empty());
     let relay_key = std::env::var("RELAY_API_KEY").ok();
     if let Some(ref url) = relay_url {
         tracing::info!(relay = %url, "push automatique vers le relais activé");
