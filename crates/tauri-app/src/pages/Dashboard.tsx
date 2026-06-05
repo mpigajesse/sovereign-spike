@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api } from "../api";
 
 interface NodeState {
-  status: "ok" | "down" | "loading";
+  status: "ok" | "down" | "loading" | "unset";
   detail?: string;
 }
 
@@ -19,45 +19,63 @@ export default function Dashboard() {
   const [relay,   setRelay]   = useState<NodeState>({ status: "loading" });
   const [stats,   setStats]   = useState<Stats>({ seq: null, epoch: null, lastSeq: null, blobs: null });
 
-  // URLs configurées (page Configuration) — affichées telles quelles
+  // URLs configurées (page Configuration) — vides tant que non saisies
   const urls = {
-    active:  localStorage.getItem("sovereign_active_url")  ?? "http://192.168.200.1:3000",
-    passive: localStorage.getItem("sovereign_passive_url") ?? "http://192.168.200.131:3001",
-    relay:   localStorage.getItem("sovereign_relay_url")   ?? "http://192.168.200.132:4000",
+    active:  localStorage.getItem("sovereign_active_url")  ?? "",
+    passive: localStorage.getItem("sovereign_passive_url") ?? "",
+    relay:   localStorage.getItem("sovereign_relay_url")   ?? "",
   };
-  const shortUrl = (u: string) => u.replace(/^https?:\/\//, "");
+  const shortUrl = (u: string) => u ? u.replace(/^https?:\/\//, "") : "non configuré";
 
   const refresh = useCallback(async () => {
-    // Nœud actif
-    api.healthActive()
-      .then(h => setActive({ status: h.trim() === "ok" ? "ok" : "down" }))
-      .catch(() => setActive({ status: "down" }));
+    // On relit les URLs à chaque tick (l'utilisateur peut les changer sans reload)
+    const cfg = {
+      active:  localStorage.getItem("sovereign_active_url")  ?? "",
+      passive: localStorage.getItem("sovereign_passive_url") ?? "",
+      relay:   localStorage.getItem("sovereign_relay_url")   ?? "",
+    };
 
-    // Époque + dernier seq
-    api.getEpoch()
-      .then(e => setStats(s => ({ ...s, epoch: e.epoch })))
-      .catch(() => {});
+    // Nœud actif — sauté si non configuré
+    if (!cfg.active) {
+      setActive({ status: "unset" });
+    } else {
+      api.healthActive()
+        .then(h => setActive({ status: h.trim() === "ok" ? "ok" : "down" }))
+        .catch(() => setActive({ status: "down" }));
 
-    api.getJournal(0, 1)
-      .then(j => setStats(s => ({ ...s, seq: j.length > 0 ? Math.max(...j.map(x => x.seq)) : 0 })))
-      .catch(() => {});
+      api.getEpoch()
+        .then(e => setStats(s => ({ ...s, epoch: e.epoch })))
+        .catch(() => {});
 
-    // Nœud passif
-    api.healthPassive()
-      .then(h => setPassive({ status: h.includes("passif") ? "ok" : "down", detail: h.trim() }))
-      .catch(() => setPassive({ status: "down" }));
+      api.getJournal(0, 1)
+        .then(j => setStats(s => ({ ...s, seq: j.length > 0 ? Math.max(...j.map(x => x.seq)) : 0 })))
+        .catch(() => {});
+    }
 
-    api.syncStatus()
-      .then(s => setStats(prev => ({ ...prev, lastSeq: s.last_seq })))
-      .catch(() => {});
+    // Nœud passif — sauté si non configuré
+    if (!cfg.passive) {
+      setPassive({ status: "unset" });
+    } else {
+      api.healthPassive()
+        .then(h => setPassive({ status: h.includes("passif") ? "ok" : "down", detail: h.trim() }))
+        .catch(() => setPassive({ status: "down" }));
 
-    // Relais
-    api.healthRelay()
-      .then(r => {
-        setRelay({ status: r.status === "ok" ? "ok" : "down", detail: `${r.blob_count} blobs` });
-        setStats(s => ({ ...s, blobs: r.blob_count }));
-      })
-      .catch(() => setRelay({ status: "down" }));
+      api.syncStatus()
+        .then(s => setStats(prev => ({ ...prev, lastSeq: s.last_seq })))
+        .catch(() => {});
+    }
+
+    // Relais — sauté si non configuré
+    if (!cfg.relay) {
+      setRelay({ status: "unset" });
+    } else {
+      api.healthRelay()
+        .then(r => {
+          setRelay({ status: r.status === "ok" ? "ok" : "down", detail: `${r.blob_count} blobs` });
+          setStats(s => ({ ...s, blobs: r.blob_count }));
+        })
+        .catch(() => setRelay({ status: "down" }));
+    }
   }, []);
 
   useEffect(() => {
@@ -66,15 +84,20 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, [refresh]);
 
+  const dotColor = (s: NodeState["status"]) =>
+    s === "ok" ? "green" : s === "down" ? "red" : "yellow"; // loading + unset => jaune/gris
+  const badgeLabel = (s: NodeState["status"]) =>
+    s === "loading" ? "⟳ Vérification…" : s === "ok" ? "En ligne" : s === "unset" ? "Non configuré" : "Hors ligne";
+
   const NodeCard = ({ title, url, state, sub }: { title: string; url: string; state: NodeState; sub?: string }) => (
     <div className="node-card">
       <div className="node-name">
-        <span className={`dot dot-${state.status === "loading" ? "yellow" : state.status === "ok" ? "green" : "red"}`} />
+        <span className={`dot dot-${dotColor(state.status)}`} />
         {title}
       </div>
       <div className="node-url">{url}</div>
-      <span className={`badge badge-${state.status === "loading" ? "yellow" : state.status === "ok" ? "green" : "red"}`}>
-        {state.status === "loading" ? "⟳ Vérification…" : state.status === "ok" ? "En ligne" : "Hors ligne"}
+      <span className={`badge badge-${dotColor(state.status)}`}>
+        {badgeLabel(state.status)}
       </span>
       {sub && <div className="node-stat">{sub}</div>}
     </div>

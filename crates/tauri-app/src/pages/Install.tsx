@@ -12,14 +12,32 @@ interface Props {
 export default function Install({ onComplete }: Props) {
   const [step,       setStep]       = useState<"role" | "config" | "installing" | "done">("role");
   const [role,       setRole]       = useState<Role | null>(null);
-  const [primaryUrl, setPrimaryUrl] = useState("http://192.168.200.1:3000");
-  const [primaryPg,  setPrimaryPg]  = useState("192.168.200.1");
+  // Vides par défaut : l'utilisateur saisit lui-même l'adresse du primary.
+  const [primaryUrl, setPrimaryUrl] = useState("");
+  const [primaryPg,  setPrimaryPg]  = useState("");
   const [log,        setLog]        = useState<string[]>([]);
   const [error,      setError]      = useState<string | null>(null);
 
   const addLog = (msg: string) => setLog(l => [...l, msg]);
 
+  // Extrait l'hôte nu : "http://192.168.200.1:5432/x" -> "192.168.200.1"
+  // (le champ "IP PostgreSQL" attend une IP, pas une URL).
+  const bareHost = (s: string) =>
+    s.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "");
+
   const startInstall = async () => {
+    // Validation des adresses saisies manuellement (standby / client)
+    if (role === "standby" || role === "client") {
+      if (!primaryUrl.trim()) {
+        setError("Saisissez l'URL du nœud actif (ex. http://192.168.200.1:3000).");
+        return;
+      }
+    }
+    if (role === "standby" && !primaryPg.trim()) {
+      setError("Saisissez l'IP PostgreSQL du primary (ex. 192.168.200.1).");
+      return;
+    }
+
     setStep("installing");
     setError(null);
     setLog([]);
@@ -69,15 +87,15 @@ export default function Install({ onComplete }: Props) {
         }
         addLog("PostgreSQL détecté ✓");
         addLog("Lancement du script de configuration standby...");
-        const result = await invoke<string>("run_standby_setup", { primaryIp: primaryPg });
+        const result = await invoke<string>("run_standby_setup", { primaryIp: bareHost(primaryPg) });
         addLog(result);
         localStorage.setItem("sovereign_role", "standby");
-        localStorage.setItem("sovereign_active_url", primaryUrl);
+        localStorage.setItem("sovereign_active_url", primaryUrl.trim());
 
       } else {
         // Client — pas d'installation, juste la config URL
         localStorage.setItem("sovereign_role", "client");
-        localStorage.setItem("sovereign_active_url", primaryUrl);
+        localStorage.setItem("sovereign_active_url", primaryUrl.trim());
         addLog("Configuration client enregistrée ✓");
       }
 

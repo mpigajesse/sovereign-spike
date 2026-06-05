@@ -18,13 +18,17 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "settings",  label: "Configuration",     icon: "⚙" },
 ];
 
-type AppState = "install" | "startup" | "solo-restart" | "ready";
+type AppState = "install" | "startup" | "solo-restart" | "primary-restart" | "ready";
 
 function getInitialState(): AppState {
   // Premier lancement : afficher l'assistant d'installation
   if (!localStorage.getItem("sovereign_installed")) return "install";
+  const role = localStorage.getItem("sovereign_role");
   // Relancement en mode solo : il faut redémarrer le nœud solo embarqué
-  if (localStorage.getItem("sovereign_role") === "solo") return "solo-restart";
+  if (role === "solo") return "solo-restart";
+  // Relancement en mode primary : le nœud actif (process enfant) est mort
+  // avec l'app précédente — il faut le relancer.
+  if (role === "primary") return "primary-restart";
   return "startup";
 }
 
@@ -41,6 +45,19 @@ export default function App() {
     invoke("start_solo_node", { dekHex: dek })
       .catch(() => { /* déjà démarré ou mode navigateur */ })
       .finally(() => { setNodeMode("solo"); setAppState("ready"); });
+  }, [appState]);
+
+  // Redémarrage automatique du nœud actif (rôle primary) au relancement.
+  // Le binaire lit DATABASE_URL/DEK par défaut côté Rust (cf. start_active_node).
+  useEffect(() => {
+    if (appState !== "primary-restart") return;
+    invoke("start_active_node", { dbUrl: "", dekHex: "", relayUrl: "", relayKey: "" })
+      .catch(() => { /* déjà démarré, PG indisponible, ou mode navigateur */ })
+      .finally(() => {
+        localStorage.setItem("sovereign_active_url", "http://127.0.0.1:3000");
+        setNodeMode("local");
+        setAppState("ready");
+      });
   }, [appState]);
 
   const handleInstallComplete = () => {
@@ -77,6 +94,14 @@ export default function App() {
       <div style={{ fontSize: 48 }}>⬢</div>
       <div style={{ fontSize: 18, fontWeight: 700 }}>Démarrage du nœud solo…</div>
       <div style={{ fontSize: 13, color: "var(--text-muted)" }}>SQLite local — sans serveur</div>
+      <div style={{ fontSize: 32 }}><span className="spin">↻</span></div>
+    </div>
+  );
+  if (appState === "primary-restart") return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)", gap: 20 }}>
+      <div style={{ fontSize: 48 }}>◉</div>
+      <div style={{ fontSize: 18, fontWeight: 700 }}>Démarrage du nœud actif…</div>
+      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>PostgreSQL — source de vérité</div>
       <div style={{ fontSize: 32 }}><span className="spin">↻</span></div>
     </div>
   );

@@ -1,11 +1,14 @@
 // Client HTTP vers le nœud actif souverain (sovereign-node-active)
 // Les URLs sont lues depuis le localStorage (configurables depuis la page Settings)
 
+// Aucune adresse par défaut : la config est vide tant que l'utilisateur n'a
+// pas saisi/découvert ses propres adresses (ou que le démarrage n'a pas
+// auto-renseigné l'actif local en 127.0.0.1 sur la machine primary).
 function getConfig() {
   return {
-    activeUrl:  localStorage.getItem("sovereign_active_url")  ?? "http://192.168.200.1:3000",
-    passiveUrl: localStorage.getItem("sovereign_passive_url") ?? "http://192.168.200.131:3001",
-    relayUrl:   localStorage.getItem("sovereign_relay_url")   ?? "http://192.168.200.132:4000",
+    activeUrl:  localStorage.getItem("sovereign_active_url")  ?? "",
+    passiveUrl: localStorage.getItem("sovereign_passive_url") ?? "",
+    relayUrl:   localStorage.getItem("sovereign_relay_url")   ?? "",
   };
 }
 

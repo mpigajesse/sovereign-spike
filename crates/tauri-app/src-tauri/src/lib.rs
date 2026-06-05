@@ -323,11 +323,23 @@ async fn run_standby_setup(primary_ip: String, app: tauri::AppHandle) -> Result<
     // Chercher le script embarqué dans les ressources Tauri
     let script_content = find_standby_script(&app)?;
 
+    // Normaliser l'entrée : on attend une IP nue. On retire un éventuel
+    // schéma "http://" et tout ":port" / "/chemin" collés par erreur, sinon
+    // PostgreSQL/PowerShell tenterait de résoudre "http://x" comme un hôte.
+    let host = primary_ip
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("")
+        .to_string();
+
     // Injecter l'IP du primary fournie par l'utilisateur
-    let content = if !primary_ip.trim().is_empty() {
+    let content = if !host.is_empty() {
         script_content.replace(
             r#"$PRIMARY_IP   = "192.168.200.1""#,
-            &format!(r#"$PRIMARY_IP   = "{}""#, primary_ip.trim()),
+            &format!(r#"$PRIMARY_IP   = "{host}""#),
         )
     } else {
         script_content

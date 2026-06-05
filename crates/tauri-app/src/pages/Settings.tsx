@@ -1,9 +1,11 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-const DEFAULTS = {
+// Exemples affichés en placeholder uniquement — les champs sont VIDES par
+// défaut : l'utilisateur saisit (ou découvre) ses propres adresses.
+const EXAMPLES = {
   active:  "http://192.168.200.1:3000",
-  passive: "http://192.168.200.131:3001",
+  passive: "http://192.168.200.133:3001",
   relay:   "http://192.168.200.132:4000",
 };
 
@@ -15,26 +17,36 @@ interface DiscoveredNode {
 }
 
 export default function Settings() {
-  const [active,  setActive]  = useState(localStorage.getItem("sovereign_active_url")  ?? DEFAULTS.active);
-  const [passive, setPassive] = useState(localStorage.getItem("sovereign_passive_url") ?? DEFAULTS.passive);
-  const [relay,   setRelay]   = useState(localStorage.getItem("sovereign_relay_url")   ?? DEFAULTS.relay);
+  // Champs VIDES par défaut : on ne lit que ce que l'utilisateur a déjà saisi.
+  const [active,  setActive]  = useState(localStorage.getItem("sovereign_active_url")  ?? "");
+  const [passive, setPassive] = useState(localStorage.getItem("sovereign_passive_url") ?? "");
+  const [relay,   setRelay]   = useState(localStorage.getItem("sovereign_relay_url")   ?? "");
   const [saved,   setSaved]   = useState(false);
 
   const [scanning,   setScanning]   = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredNode[] | null>(null);
 
+  // Un champ vide => on supprime la clé (pas de valeur résiduelle dans le storage)
+  const persist = (key: string, val: string) => {
+    const v = val.trim();
+    if (v) localStorage.setItem(key, v);
+    else   localStorage.removeItem(key);
+  };
+
   const save = () => {
-    localStorage.setItem("sovereign_active_url",  active);
-    localStorage.setItem("sovereign_passive_url", passive);
-    localStorage.setItem("sovereign_relay_url",   relay);
+    persist("sovereign_active_url",  active);
+    persist("sovereign_passive_url", passive);
+    persist("sovereign_relay_url",   relay);
     setSaved(true);
     setTimeout(() => setSaved(false), 3000);
   };
 
-  const reset = () => {
-    setActive(DEFAULTS.active);
-    setPassive(DEFAULTS.passive);
-    setRelay(DEFAULTS.relay);
+  // Vide les champs ET le storage — l'utilisateur repart d'une config vierge.
+  const clearAll = () => {
+    setActive("");  setPassive("");  setRelay("");
+    localStorage.removeItem("sovereign_active_url");
+    localStorage.removeItem("sovereign_passive_url");
+    localStorage.removeItem("sovereign_relay_url");
   };
 
   // Découverte réseau automatique (scan VMnet1)
@@ -42,9 +54,10 @@ export default function Settings() {
     setScanning(true);
     setDiscovered(null);
     try {
-      // Déduire le sous-réseau depuis l'URL active courante (ex: 192.168.200)
+      // Déduire le sous-réseau depuis l'URL active SI saisie ; sinon laisser
+      // vide pour que le cœur Rust auto-détecte le LAN (detect_lan_subnet).
       const m = active.match(/(\d+\.\d+\.\d+)\.\d+/);
-      const subnet = m ? m[1] : "192.168.200";
+      const subnet = m ? m[1] : "";
       const nodes = await invoke<DiscoveredNode[]>("discover_nodes", { subnet });
       setDiscovered(nodes);
       // Pré-remplir automatiquement les champs depuis les nœuds trouvés
@@ -121,7 +134,7 @@ export default function Settings() {
             <input
               value={active} onChange={e => setActive(e.target.value)}
               style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "9px 12px", borderRadius: 7, fontSize: 13 }}
-              placeholder="http://192.168.200.1:3000"
+              placeholder={`ex. ${EXAMPLES.active}`}
             />
             <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
               IP de la machine Windows 11 sur VMnet1
@@ -135,7 +148,7 @@ export default function Settings() {
             <input
               value={passive} onChange={e => setPassive(e.target.value)}
               style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "9px 12px", borderRadius: 7, fontSize: 13 }}
-              placeholder="http://192.168.200.131:3001"
+              placeholder={`ex. ${EXAMPLES.passive}`}
             />
           </div>
 
@@ -146,14 +159,14 @@ export default function Settings() {
             <input
               value={relay} onChange={e => setRelay(e.target.value)}
               style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "9px 12px", borderRadius: 7, fontSize: 13 }}
-              placeholder="http://192.168.200.132:4000"
+              placeholder={`ex. ${EXAMPLES.relay}`}
             />
           </div>
         </div>
 
         <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
           <button className="btn btn-primary" onClick={save}>Sauvegarder</button>
-          <button className="btn btn-ghost" onClick={reset}>Réinitialiser (défauts)</button>
+          <button className="btn btn-ghost" onClick={clearAll}>Vider les champs</button>
         </div>
       </div>
 
