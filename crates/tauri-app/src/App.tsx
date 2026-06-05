@@ -40,7 +40,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
-  const [version,  setVersion]  = useState("0.1.6");
+  const [version,  setVersion]  = useState("0.1.7");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {

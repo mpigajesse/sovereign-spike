@@ -59,15 +59,22 @@ async fn start_active_node(
     state:     State<'_, NodeProcess>,
     app:       tauri::AppHandle,
 ) -> Result<StartupStatus, String> {
-    // Déjà démarré ?
+    // Déjà démarré ET toujours vivant ? Si l'enfant est mort, on nettoie le slot
+    // et on relance (sinon un enfant mort « poison » l'état et bloque tout
+    // redémarrage du nœud — bug observé en 0.1.6).
     {
-        let guard = state.0.lock().map_err(|e| e.to_string())?;
-        if guard.is_some() {
-            return Ok(StartupStatus {
-                mode:       "local".into(),
-                message:    "Nœud actif déjà en cours".into(),
-                active_url: "http://127.0.0.1:3000".into(),
-            });
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(None) => {
+                    return Ok(StartupStatus {
+                        mode:       "local".into(),
+                        message:    "Nœud actif déjà en cours".into(),
+                        active_url: "http://127.0.0.1:3000".into(),
+                    });
+                }
+                _ => { *guard = None; } // mort ou erreur → on relance
+            }
         }
     }
 
@@ -507,62 +514,6 @@ async fn ping_node(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-// ── Setup hook — auto-démarrage ───────────────────────────────────────────────
-
-fn auto_start_node(app: &tauri::AppHandle) {
-    // Lire la config depuis localStorage n'est pas accessible ici (WebView pas encore chargé).
-    // On détermine : si PostgreSQL local disponible → tenter de démarrer.
-    // Le frontend est notifié via l'état get_startup_status.
-    let app = app.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            if !check_pg_available().await {
-                return; // Mode client — le frontend gérera
-            }
-            let bin = find_binary(&app);
-            let Some(bin) = bin else { return; };
-
-            // Lire la DEK depuis shared.env si disponible
-            let dek = read_dek_from_env(&app).unwrap_or_default();
-
-            let child = Command::new(&bin)
-                .env("DATABASE_URL",      "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active")
-                .env("LISTEN_ADDR",       "0.0.0.0:3000")
-                .env("SOVEREIGN_DEK_HEX", &dek)
-                .spawn();
-
-            if let Ok(child) = child {
-                let state = app.state::<NodeProcess>();
-                let mut guard = state.0.lock().unwrap();
-                *guard = Some(child);
-                eprintln!("[sovereign-tauri] Nœud actif démarré automatiquement");
-            }
-        });
-    });
-}
-
-fn read_dek_from_env(app: &tauri::AppHandle) -> Option<String> {
-    // Chercher shared.env à côté de l'exe
-    let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-    let candidates = [
-        exe_dir.join("shared.env"),
-        exe_dir.join("scripts").join("shared.env"),
-        app.path().resource_dir().ok()?.join("shared.env"),
-    ];
-
-    for path in &candidates {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            for line in content.lines() {
-                if let Some(val) = line.strip_prefix("SOVEREIGN_DEK_HEX=") {
-                    return Some(val.trim().to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
 // ── Administration du cluster (failover manuel + mode de réplication) ──────────
 //
 // Ces commandes pilotent PostgreSQL via psql (couche base). Elles répondent à
@@ -681,9 +632,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(NodeProcess(Mutex::new(None)))
-        .setup(|app| {
-            // Auto-démarrage du nœud actif si PostgreSQL local est disponible
-            auto_start_node(app.handle());
+        .setup(|_app| {
+            // Pas d'auto-start ici : le démarrage du nœud (actif / solo / relais)
+            // est piloté par le frontend selon le RÔLE choisi (cf. App.tsx), avec
+            // la bonne DEK. Un spawn générique sans DEK valide ferait planter le
+            // nœud et « poisonnerait » l'état (slot occupé par un enfant mort).
             Ok(())
         })
         .on_window_event(|_window, event| {
