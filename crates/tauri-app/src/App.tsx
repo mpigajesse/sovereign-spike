@@ -37,7 +37,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
-  const [version,  setVersion]  = useState("0.1.1");
+  const [version,  setVersion]  = useState("0.1.2");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {
@@ -148,11 +148,16 @@ export default function App() {
           </span>
         </div>
 
-        {/* Réinstaller */}
+        {/* Réinstaller — remise à zéro COMPLÈTE de la config locale, sinon un
+            rôle/URL résiduel survit et fausse le tableau de bord (ex. badge
+            "primary" coincé). On garde la DEK pour ne pas perdre l'accès aux
+            données chiffrées en mode solo. */}
         <div
           style={{ padding: "8px 20px 16px", fontSize: 11, color: "var(--text-muted)", cursor: "pointer" }}
           onClick={() => {
-            localStorage.removeItem("sovereign_installed");
+            ["sovereign_installed", "sovereign_role",
+             "sovereign_active_url", "sovereign_passive_url", "sovereign_relay_url"]
+              .forEach(k => localStorage.removeItem(k));
             window.location.reload();
           }}
         >
