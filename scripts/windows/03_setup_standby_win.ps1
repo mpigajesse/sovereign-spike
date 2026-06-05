@@ -3,7 +3,8 @@
 # Machine  : Windows 11 VM — à adapter selon l'IP réelle (remplacer STANDBY_IP)
 # Primary  : Windows 11 physique — 192.168.200.1:5432
 #
-# À exécuter UNE SEULE FOIS en tant qu'Administrateur sur la VM Windows 11.
+# À exécuter UNE SEULE FOIS sur la VM Windows 11.
+# Le script s'auto-élève en administrateur si nécessaire (UAC).
 # Ce script :
 #   1. Vérifie que PostgreSQL 18 est installé sur la VM
 #   2. Clone le primary via pg_basebackup
@@ -11,7 +12,25 @@
 #   4. Crée standby.signal
 #   5. Démarre PostgreSQL en mode standby
 # =============================================================================
-#Requires -RunAsAdministrator
+
+# ── Auto-élévation administrateur (UAC) ───────────────────────────────────────
+# Si le script n'est pas lancé en admin (cas : lancé depuis l'app Tauri non élevée),
+# il se relance lui-même avec élévation. Une fenêtre UAC s'affiche → l'utilisateur
+# clique "Oui", et le script reprend dans une console élevée.
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) {
+    Write-Host "Élévation administrateur requise — une fenêtre UAC va s'ouvrir..." -ForegroundColor Yellow
+    $scriptPath = $MyInvocation.MyCommand.Definition
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-NoExit", "-File", "`"$scriptPath`"")
+    try {
+        Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList
+        Write-Host "Script relancé en administrateur dans une nouvelle fenêtre." -ForegroundColor Green
+    } catch {
+        Write-Error "Élévation refusée. Relancez PowerShell en tant qu'administrateur, puis réexécutez le script."
+    }
+    exit
+}
 
 $PRIMARY_IP   = "192.168.200.1"
 $PRIMARY_PORT = "5432"

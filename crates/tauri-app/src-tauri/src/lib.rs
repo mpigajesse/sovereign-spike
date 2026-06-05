@@ -151,6 +151,68 @@ async fn check_pg_local() -> bool {
     check_pg_available().await
 }
 
+/// Nœud découvert sur le réseau local.
+#[derive(Debug, Serialize)]
+pub struct DiscoveredNode {
+    pub ip:   String,
+    pub port: u16,
+    pub role: String, // "actif" | "passif" | "relais"
+    pub url:  String,
+}
+
+/// Découverte réseau : scanne le sous-réseau VMnet1 (192.168.200.0/24)
+/// pour trouver les nœuds souverains actifs, passifs et relais.
+///
+/// Conforme au document de cadrage §6 : la découverte locale automatique évite
+/// à la PME de saisir des adresses IP. (Le spike scanne au lieu d'utiliser mDNS,
+/// explicitement hors-périmètre Phase 0 §7.5 — même résultat ergonomique.)
+#[tauri::command]
+async fn discover_nodes(subnet: Option<String>) -> Vec<DiscoveredNode> {
+    let base = subnet.unwrap_or_else(|| "192.168.200".to_string());
+
+    // Ports et rôles à sonder
+    let probes: &[(u16, &str, &str)] = &[
+        (3000, "actif",  "/health"),
+        (3001, "passif", "/health"),
+        (4000, "relais", "/health"),
+    ];
+
+    let mut handles = Vec::new();
+
+    // Scanner les hôtes 1..=254 en parallèle
+    for host in 1u8..=254 {
+        let ip = format!("{base}.{host}");
+        for &(port, role, path) in probes {
+            let ip = ip.clone();
+            let role = role.to_string();
+            let path = path.to_string();
+            handles.push(tokio::spawn(async move {
+                let url = format!("http://{ip}:{port}");
+                let probe_url = format!("{url}{path}");
+                let client = reqwest::Client::builder()
+                    .timeout(Duration::from_millis(400))
+                    .build()
+                    .ok()?;
+                match client.get(&probe_url).send().await {
+                    Ok(r) if r.status().is_success() => Some(DiscoveredNode {
+                        ip, port, role, url,
+                    }),
+                    _ => None,
+                }
+            }));
+        }
+    }
+
+    let mut found = Vec::new();
+    for h in handles {
+        if let Ok(Some(node)) = h.await {
+            found.push(node);
+        }
+    }
+    found.sort_by(|a, b| a.port.cmp(&b.port));
+    found
+}
+
 /// Démarre le nœud SOLO (SQLite, sans PostgreSQL).
 /// Mode TPE/PME mono-poste : aucune dépendance serveur.
 #[tauri::command]
@@ -423,6 +485,7 @@ pub fn run() {
             check_pg_local,
             run_standby_setup,
             start_solo_node,
+            discover_nodes,
         ])
         .run(tauri::generate_context!())
         .expect("Erreur lors du démarrage Tauri");
