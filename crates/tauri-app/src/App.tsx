@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
 import Startup  from "./pages/Startup";
 import Install  from "./pages/Install";
 import Dashboard from "./pages/Dashboard";
@@ -36,6 +37,12 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
+  const [version,  setVersion]  = useState("0.1.1");
+
+  // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => { /* mode navigateur : garde le fallback */ });
+  }, []);
 
   // Redémarrage automatique du nœud solo au relancement de l'app
   useEffect(() => {
@@ -117,7 +124,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-logo">
           ⬡ Sovereign
-          <span>Data Agent v0.1</span>
+          <span>Data Agent v{version}</span>
         </div>
 
         {NAV.map(n => (
