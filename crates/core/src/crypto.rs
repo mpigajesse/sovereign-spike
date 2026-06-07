@@ -147,6 +147,95 @@ pub fn gen_kdf_salt() -> [u8; SALTBYTES] {
     s.0
 }
 
+// ── Helpers hex pour les couches HTTP / UI (nœud actif, Tauri) ────────────────
+//
+// Le nœud actif et l'app Tauri ne manipulent que des chaînes hex et des `Dek` :
+// ces helpers encapsulent les types sodiumoxide (PublicKey/SecretKey) pour éviter
+// de les exposer hors du cœur.
+
+impl DeviceKeypair {
+    /// Clé publique de l'appareil en hex (le « QR » à présenter à l'enrôlement).
+    pub fn public_hex(&self) -> String {
+        hex::encode(self.public.as_ref())
+    }
+
+    /// Ouvre une sealed box hex reçue de l'appareil enrôleur → DEK en hex.
+    /// Preuve du critère #8 : l'appareil récupère la clé avec sa seule clé privée.
+    pub fn unwrap_dek_hex(&self, sealed_hex: &str) -> Result<String, CryptoError> {
+        let sealed = hex::decode(sealed_hex.trim()).map_err(|_| CryptoError::SealedBoxFailed)?;
+        let dek = unwrap_dek(&sealed, &self.public, &self.private)?;
+        Ok(hex::encode(dek.as_bytes()))
+    }
+}
+
+/// Parse une clé publique X25519 depuis du hex (32 octets).
+pub fn public_key_from_hex(s: &str) -> Option<PublicKey> {
+    PublicKey::from_slice(&hex::decode(s.trim()).ok()?)
+}
+
+/// Emballe la DEK pour une clé publique d'appareil fournie en hex → sealed box hex.
+/// Utilisé à l'enrôlement et à chaque rotation (re-scellement pour les appareils restants).
+pub fn wrap_dek_hex(dek: &Dek, device_pubkey_hex: &str) -> Option<String> {
+    let pk = public_key_from_hex(device_pubkey_hex)?;
+    Some(hex::encode(wrap_dek(dek, &pk)))
+}
+
+/// Tente de déchiffrer un blob (nonce + ciphertext hex) avec une DEK hex.
+/// Renvoie `true` si la DEK est la bonne. Sert à PROUVER le critère #9 :
+/// l'ancienne DEK d'un appareil dé-enrôlé échoue sur un blob écrit après rotation.
+pub fn try_decrypt_hex(dek_hex: &str, nonce_hex: &str, ct_hex: &str) -> bool {
+    let Some(dek) = hex::decode(dek_hex.trim()).ok().and_then(|b| Dek::from_bytes(&b)) else {
+        return false;
+    };
+    let Ok(nonce_v) = hex::decode(nonce_hex.trim()) else { return false };
+    if nonce_v.len() != NONCEBYTES {
+        return false;
+    }
+    let mut nonce = [0u8; NONCEBYTES];
+    nonce.copy_from_slice(&nonce_v);
+    let Ok(ciphertext) = hex::decode(ct_hex.trim()) else { return false };
+    decrypt(&EncryptedBlob { nonce, ciphertext }, &dek).is_ok()
+}
+
+// ── Code de récupération autoporté (salt + nonce + ciphertext) ────────────────
+
+/// DEK emballée sous une passphrase (Argon2id) — tout le nécessaire pour restaurer.
+pub struct RecoveryBlob {
+    pub salt:       Vec<u8>,
+    pub nonce:      Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+/// Emballe la DEK sous une passphrase de récupération (à imprimer « au coffre »).
+pub fn recovery_wrap(dek: &Dek, passphrase: &[u8]) -> Result<RecoveryBlob, CryptoError> {
+    let salt = gen_kdf_salt();
+    let kek = derive_key_from_passphrase(passphrase, &salt)?;
+    let blob = encrypt(dek.as_bytes(), &kek);
+    Ok(RecoveryBlob {
+        salt:       salt.to_vec(),
+        nonce:      blob.nonce.to_vec(),
+        ciphertext: blob.ciphertext,
+    })
+}
+
+/// Restaure la DEK depuis la passphrase et le blob de récupération (critère #11).
+pub fn recovery_unwrap(blob: &RecoveryBlob, passphrase: &[u8]) -> Result<Dek, CryptoError> {
+    if blob.salt.len() != SALTBYTES || blob.nonce.len() != NONCEBYTES {
+        return Err(CryptoError::KdfFailed);
+    }
+    let mut salt = [0u8; SALTBYTES];
+    salt.copy_from_slice(&blob.salt);
+    let kek = derive_key_from_passphrase(passphrase, &salt)?;
+    let mut nonce = [0u8; NONCEBYTES];
+    nonce.copy_from_slice(&blob.nonce);
+    let dek_bytes = decrypt(
+        &EncryptedBlob { nonce, ciphertext: blob.ciphertext.clone() },
+        &kek,
+    )
+    .map_err(|_| CryptoError::DecryptFailed)?;
+    Dek::from_bytes(&dek_bytes).ok_or(CryptoError::DecryptFailed)
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -238,5 +327,65 @@ mod tests {
         let blob = encrypt(msg, &dek1);
         let plain = decrypt(&blob, &dek2).expect("dechiffrement avec cle derivee");
         assert_eq!(plain, msg);
+    }
+
+    // ── Helpers runtime (#8/#9/#11) ──────────────────────────────────────────
+
+    #[test]
+    fn wrap_unwrap_dek_hex_roundtrip() {
+        // #8 : l'appareil récupère la DEK via sa clé privée, à partir de hex seulement.
+        setup();
+        let dek = Dek::generate();
+        let appareil = DeviceKeypair::generate();
+
+        let sealed_hex = wrap_dek_hex(&dek, &appareil.public_hex()).expect("wrap hex");
+        let dek_hex = appareil.unwrap_dek_hex(&sealed_hex).expect("unwrap hex");
+        assert_eq!(dek_hex, hex::encode(dek.as_bytes()));
+    }
+
+    #[test]
+    fn wrap_dek_hex_rejette_cle_invalide() {
+        setup();
+        let dek = Dek::generate();
+        assert!(wrap_dek_hex(&dek, "pas-du-hex").is_none());
+        assert!(wrap_dek_hex(&dek, "aabb").is_none()); // trop court
+    }
+
+    #[test]
+    fn try_decrypt_hex_distingue_bonne_et_mauvaise_dek() {
+        // #9 : un blob écrit avec la DEK v2 ne se déchiffre pas avec la DEK v1 (dé-enrôlé).
+        setup();
+        let dek_v1 = Dek::generate();
+        let dek_v2 = Dek::generate();
+        let blob = encrypt(b"vente apres rotation", &dek_v2);
+        let nonce_hex = hex::encode(blob.nonce);
+        let ct_hex = hex::encode(&blob.ciphertext);
+
+        assert!(try_decrypt_hex(&hex::encode(dek_v2.as_bytes()), &nonce_hex, &ct_hex),
+            "DEK courante doit déchiffrer");
+        assert!(!try_decrypt_hex(&hex::encode(dek_v1.as_bytes()), &nonce_hex, &ct_hex),
+            "DEK périmée (appareil dé-enrôlé) doit échouer");
+        assert!(!try_decrypt_hex("zz", &nonce_hex, &ct_hex), "hex invalide → false, pas de panique");
+    }
+
+    #[test]
+    fn recovery_wrap_unwrap_roundtrip() {
+        // #11 : restauration de la DEK depuis la seule passphrase.
+        setup();
+        let dek = Dek::generate();
+        let passphrase = b"gerant-coffre-haute-entropie-2026";
+
+        let blob = recovery_wrap(&dek, passphrase).expect("emballage récupération");
+        let restored = recovery_unwrap(&blob, passphrase).expect("restauration");
+        assert_eq!(restored.as_bytes(), dek.as_bytes());
+    }
+
+    #[test]
+    fn recovery_mauvaise_passphrase_echoue() {
+        setup();
+        let dek = Dek::generate();
+        let blob = recovery_wrap(&dek, b"bonne-passphrase-secrete").expect("emballage");
+        assert!(recovery_unwrap(&blob, b"mauvaise-passphrase-xxx").is_err(),
+            "une passphrase incorrecte ne doit jamais restaurer la DEK");
     }
 }

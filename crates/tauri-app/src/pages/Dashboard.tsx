@@ -87,7 +87,8 @@ export default function Dashboard() {
     } else {
       api.healthRelay()
         .then(r => {
-          setRelay({ status: r.status === "ok" ? "ok" : "down", detail: `${r.blob_count} blobs` });
+          const tenants = r.tenant_count ? ` · ${r.tenant_count} PME` : "";
+          setRelay({ status: r.status === "ok" ? "ok" : "down", detail: `${r.blob_count} blobs${tenants}` });
           setStats(s => ({ ...s, blobs: r.blob_count }));
         })
         .catch(() => setRelay({ status: "down" }));
@@ -130,7 +131,7 @@ export default function Dashboard() {
       <div className="nodes-grid">
         <NodeCard title="Nœud Actif"  url={shortUrl(urls.active)}  state={active}  sub={stats.epoch !== null ? `Époque ${stats.epoch}` : undefined} />
         <NodeCard title="Nœud Passif" url={passiveLabel}          state={passive} sub="réplication WAL synchrone" />
-        <NodeCard title="Relais"      url={shortUrl(urls.relay)}   state={relay}   sub={stats.blobs !== null ? `${stats.blobs} blobs stockés` : undefined} />
+        <NodeCard title="Relais « Amane »" url={shortUrl(urls.relay)} state={relay} sub={relay.detail ?? (stats.blobs !== null ? `${stats.blobs} blobs stockés` : undefined)} />
       </div>
 
       {/* Métriques */}

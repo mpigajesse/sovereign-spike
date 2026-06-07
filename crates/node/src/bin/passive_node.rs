@@ -238,6 +238,11 @@ async fn apply_entry(
             .execute(&mut **tx)
             .await?;
         }
+        // Opérations CRUD métier (produits / clients) : ce réplica SQLite ne reconstruit
+        // que le stock. Dans le cluster réel, le métier (schéma `business`) est répliqué
+        // par la réplication WAL PostgreSQL vers le standby — pas par ce chemin.
+        OpType::ProduitUpsert | OpType::ProduitDelete
+        | OpType::ClientUpsert | OpType::ClientDelete => {}
     }
 
     Ok(())

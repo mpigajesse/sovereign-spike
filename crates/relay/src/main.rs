@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 /// Le relais ne connaît pas la signification de ces octets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlobRecord {
+    pub tenant_id:       String,       // identité opaque de la PME (sépare les PME)
     pub seq:             i64,
     pub blob_nonce:      String,       // hex, 24 octets — opaque
     pub blob_ciphertext: String,       // hex, longueur variable — opaque
@@ -41,16 +42,22 @@ pub struct BlobRecord {
 }
 
 /// Corps de la requête POST /blobs (envoyé par le nœud actif).
+/// `tenant_id` : identifiant opaque de la PME. Le relais s'en sert UNIQUEMENT pour
+/// cloisonner les blobs (multi-tenant) — il ne peut rien en déduire ni rien déchiffrer.
 #[derive(Debug, Deserialize)]
 pub struct PushBlobRequest {
+    #[serde(default)]
+    pub tenant_id:       String,
     pub seq:             i64,
     pub blob_nonce:      String,
     pub blob_ciphertext: String,
 }
 
-/// Paramètres de pagination pour GET /blobs.
+/// Paramètres de pagination pour GET /blobs (cloisonnés par tenant).
 #[derive(Debug, Deserialize)]
 pub struct FetchQuery {
+    #[serde(default)]
+    pub tenant_id: Option<String>,
     pub after_seq: Option<i64>,
     pub limit:     Option<usize>,
 }
@@ -67,10 +74,18 @@ pub struct ErrorResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct TenantBlobs {
+    pub tenant_id:  String,
+    pub blob_count: i64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct HealthResponse {
-    pub role:       &'static str,
-    pub blob_count: usize,
-    pub status:     &'static str,
+    pub role:        &'static str,
+    pub blob_count:  usize,      // total tous tenants confondus
+    pub tenant_count: usize,     // nombre de PME distinctes sauvegardées
+    pub tenants:     Vec<TenantBlobs>,
+    pub status:      &'static str,
 }
 
 // ── État partagé ──────────────────────────────────────────────────────────────
@@ -125,10 +140,25 @@ async fn handle_health(State(state): State<SharedState>) -> Json<HealthResponse>
         .fetch_one(&state.pool)
         .await
         .unwrap_or(0);
+
+    // Répartition par tenant — preuve du cloisonnement multi-tenant (sans rien déchiffrer).
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT tenant_id, COUNT(*) FROM relay_blobs GROUP BY tenant_id ORDER BY tenant_id",
+    )
+    .fetch_all(&state.pool)
+    .await
+    .unwrap_or_default();
+    let tenants: Vec<TenantBlobs> = rows
+        .into_iter()
+        .map(|(tenant_id, blob_count)| TenantBlobs { tenant_id, blob_count })
+        .collect();
+
     Json(HealthResponse {
-        role:       "relay-aveugle",
-        blob_count: count as usize,
-        status:     "ok",
+        role:         "amane-relay",
+        blob_count:   count as usize,
+        tenant_count: tenants.len(),
+        tenants,
+        status:       "ok",
     })
 }
 
@@ -163,11 +193,13 @@ async fn handle_push_blob(
         ));
     }
 
-    // Idempotence : INSERT OR IGNORE → pas d'écrasement si seq déjà présent
+    // Idempotence par (tenant_id, seq) : deux PME différentes peuvent avoir le même seq
+    // (chacune a son propre journal). La clé composite empêche toute collision.
     let affected = sqlx::query(
-        "INSERT OR IGNORE INTO relay_blobs (seq, blob_nonce, blob_ciphertext, received_at)
-         VALUES ($1, $2, $3, $4)",
+        "INSERT OR IGNORE INTO relay_blobs (tenant_id, seq, blob_nonce, blob_ciphertext, received_at)
+         VALUES ($1, $2, $3, $4, $5)",
     )
+    .bind(&req.tenant_id)
     .bind(req.seq)
     .bind(&req.blob_nonce)
     .bind(&req.blob_ciphertext)
@@ -181,7 +213,7 @@ async fn handle_push_blob(
         return Ok((StatusCode::OK, Json(PushResponse { seq: req.seq, status: "already_stored" })));
     }
 
-    tracing::info!(seq = req.seq, "blob stocké (SQLite) — contenu opaque, non interprété");
+    tracing::info!(tenant = %req.tenant_id, seq = req.seq, "blob stocké (SQLite) — opaque, non interprété");
     Ok((StatusCode::CREATED, Json(PushResponse { seq: req.seq, status: "stored" })))
 }
 
@@ -192,18 +224,22 @@ async fn handle_fetch_blobs(
 ) -> ApiResult<Vec<BlobRecord>> {
     let after_seq = params.after_seq.unwrap_or(0);
     let limit     = params.limit.unwrap_or(100).min(1000) as i64;
+    // Cloisonnement : un tenant ne récupère QUE ses propres blobs.
+    let tenant_id = params.tenant_id.unwrap_or_default();
 
-    let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
-        "SELECT seq, blob_nonce, blob_ciphertext, received_at
-         FROM relay_blobs WHERE seq > $1 ORDER BY seq ASC LIMIT $2",
+    let rows: Vec<(String, i64, String, String, String)> = sqlx::query_as(
+        "SELECT tenant_id, seq, blob_nonce, blob_ciphertext, received_at
+         FROM relay_blobs WHERE tenant_id = $1 AND seq > $2 ORDER BY seq ASC LIMIT $3",
     )
+    .bind(&tenant_id)
     .bind(after_seq)
     .bind(limit)
     .fetch_all(&state.pool)
     .await
     .map_err(|e| internal_error(e.to_string()))?;
 
-    let blobs = rows.into_iter().map(|(seq, nonce, ct, ts)| BlobRecord {
+    let blobs = rows.into_iter().map(|(tenant_id, seq, nonce, ct, ts)| BlobRecord {
+        tenant_id,
         seq,
         blob_nonce:      nonce,
         blob_ciphertext: ct,
@@ -269,17 +305,24 @@ async fn main() -> anyhow::Result<()> {
     let pool = sqlx::SqlitePool::connect(&db_url).await
         .map_err(|e| anyhow::anyhow!("impossible d'ouvrir SQLite relay {db_path}: {e}"))?;
 
-    // Créer la table si elle n'existe pas
+    // Créer la table si elle n'existe pas. Clé composite (tenant_id, seq) : le relais est
+    // mutualisé (multi-tenant) → deux PME peuvent avoir le même seq sans collision.
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS relay_blobs (
-            seq              INTEGER PRIMARY KEY,
+            tenant_id        TEXT    NOT NULL DEFAULT '',
+            seq              INTEGER NOT NULL,
             blob_nonce       TEXT    NOT NULL,
             blob_ciphertext  TEXT    NOT NULL,
-            received_at      TEXT    NOT NULL
+            received_at      TEXT    NOT NULL,
+            PRIMARY KEY (tenant_id, seq)
         )"
     )
     .execute(&pool)
     .await?;
+    // Compat : si une ancienne table existait sans tenant_id, ajouter la colonne.
+    let _ = sqlx::query("ALTER TABLE relay_blobs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT ''")
+        .execute(&pool)
+        .await;
 
     let state = Arc::new(RelayState { pool, api_key, max_blobs });
     let app = router(state);
@@ -288,7 +331,7 @@ async fn main() -> anyhow::Result<()> {
         addr = %listen_addr,
         max_blobs,
         db = %db_path,
-        "relais souverain aveugle démarré — aucune clé crypto chargée"
+        "relais « Amane » souverain aveugle démarré (multi-tenant) — aucune clé crypto chargée"
     );
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
@@ -309,10 +352,12 @@ mod tests {
         let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS relay_blobs (
-                seq INTEGER PRIMARY KEY,
+                tenant_id TEXT NOT NULL DEFAULT '',
+                seq INTEGER NOT NULL,
                 blob_nonce TEXT NOT NULL,
                 blob_ciphertext TEXT NOT NULL,
-                received_at TEXT NOT NULL
+                received_at TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, seq)
             )"
         ).execute(&pool).await.unwrap();
         Arc::new(RelayState {
@@ -401,9 +446,10 @@ mod tests {
         let state = make_state("k").await;
         for seq in 1i64..=5 {
             sqlx::query(
-                "INSERT INTO relay_blobs (seq, blob_nonce, blob_ciphertext, received_at)
-                 VALUES ($1, $2, $3, $4)"
+                "INSERT INTO relay_blobs (tenant_id, seq, blob_nonce, blob_ciphertext, received_at)
+                 VALUES ($1, $2, $3, $4, $5)"
             )
+            .bind("")
             .bind(seq)
             .bind("00".repeat(24))
             .bind("ff".repeat(32))
@@ -426,6 +472,57 @@ mod tests {
         assert_eq!(blobs.len(), 3);
         assert_eq!(blobs[0].seq, 3);
         assert_eq!(blobs[2].seq, 5);
+    }
+
+    #[tokio::test]
+    async fn cloisonnement_multi_tenant() {
+        // Deux PME (tenant A et B) poussent chacune un blob avec le MÊME seq=1.
+        // La clé composite (tenant_id, seq) évite la collision, et chaque tenant ne
+        // récupère QUE ses propres blobs — preuve du relais mutualisé aveugle.
+        let app = router(make_state("k").await);
+
+        let push = |tenant: &str, ct: &str| {
+            let body = serde_json::json!({
+                "tenant_id": tenant, "seq": 1,
+                "blob_nonce": "aa".repeat(24), "blob_ciphertext": ct,
+            });
+            Request::builder()
+                .method("POST").uri("/blobs")
+                .header("X-Relay-Key", "k")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&body).unwrap()))
+                .unwrap()
+        };
+
+        // Tenant A : seq 1
+        let r = app.clone().oneshot(push("tenant-A", &"11".repeat(8))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+        // Tenant B : seq 1 AUSSI → pas de collision grâce à la clé composite
+        let r = app.clone().oneshot(push("tenant-B", &"22".repeat(8))).await.unwrap();
+        assert_eq!(r.status(), StatusCode::CREATED);
+
+        // Tenant A ne voit QUE son blob
+        let r = app.clone().oneshot(
+            Request::builder().method("GET")
+                .uri("/blobs?tenant_id=tenant-A&after_seq=0&limit=10")
+                .body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let blobs: Vec<BlobRecord> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(blobs.len(), 1, "tenant A ne voit que ses blobs");
+        assert_eq!(blobs[0].tenant_id, "tenant-A");
+        assert_eq!(blobs[0].blob_ciphertext, "11".repeat(8));
+
+        // Tenant B ne voit QUE son blob
+        let r = app.oneshot(
+            Request::builder().method("GET")
+                .uri("/blobs?tenant_id=tenant-B&after_seq=0&limit=10")
+                .body(Body::empty()).unwrap(),
+        ).await.unwrap();
+        let bytes = axum::body::to_bytes(r.into_body(), usize::MAX).await.unwrap();
+        let blobs: Vec<BlobRecord> = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(blobs.len(), 1, "tenant B ne voit que ses blobs");
+        assert_eq!(blobs[0].blob_ciphertext, "22".repeat(8));
     }
 
     #[tokio::test]

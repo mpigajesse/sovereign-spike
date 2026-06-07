@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use sodiumoxide::crypto::box_::PublicKey;
 use uuid::Uuid;
 
-use crate::crypto::{unwrap_dek, wrap_dek, CryptoError, Dek, DeviceKeypair};
+use crate::crypto::{wrap_dek, CryptoError, Dek};
 
 /// Un appareil enrôlé dans le cluster souverain.
 #[derive(Debug, Clone)]
@@ -115,7 +115,7 @@ impl DeviceRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crypto::{decrypt, encrypt, init};
+    use crate::crypto::{decrypt, encrypt, init, unwrap_dek, DeviceKeypair};
 
     fn setup() -> Dek {
         init().expect("sodiumoxide init");

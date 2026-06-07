@@ -2,6 +2,7 @@
 // L'utilisateur choisit le rôle de cette machine dans le cluster souverain.
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { api } from "../api";
 
 type Role = "solo" | "primary" | "standby" | "relais";
 
@@ -19,6 +20,10 @@ export default function Install({ onComplete }: Props) {
   const [selfIp,     setSelfIp]     = useState("");
   // Mode de réplication choisi par la PME (primary) — modifiable ensuite.
   const [syncMode,   setSyncMode]   = useState(true);
+  // Création de compte (tenant) — saisie sur le nœud actif (primary).
+  const [entreprise, setEntreprise] = useState("");
+  const [gerant,     setGerant]     = useState("");
+  const [emailPme,   setEmailPme]   = useState("");
   const [log,        setLog]        = useState<string[]>([]);
   const [error,      setError]      = useState<string | null>(null);
 
@@ -30,6 +35,11 @@ export default function Install({ onComplete }: Props) {
     s.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "");
 
   const startInstall = async () => {
+    // Le nœud actif crée le compte de la PME : le nom de l'entreprise est requis.
+    if (role === "primary" && !entreprise.trim()) {
+      setError("Saisissez le nom de votre entreprise pour créer votre compte.");
+      return;
+    }
     // Validation des adresses saisies manuellement (standby uniquement)
     if (role === "standby") {
       if (!primaryUrl.trim()) {
@@ -89,6 +99,17 @@ export default function Install({ onComplete }: Props) {
         localStorage.setItem("sovereign_active_url", `http://${ip}:3000`);
         localStorage.setItem("sovereign_self_ip", ip);
         addLog(`Nœud actif démarré ✓ (${ip}:3000)`);
+
+        // Création du compte de la PME (tenant) — auto-souverain, généré localement.
+        addLog("Création de votre compte (génération du tenant_id local)...");
+        try {
+          const tenant = await api.tenantBootstrap(entreprise.trim(), gerant.trim(), emailPme.trim());
+          localStorage.setItem("sovereign_tenant_id", tenant.tenant_id);
+          localStorage.setItem("sovereign_tenant_nom", tenant.nom);
+          addLog(`Compte « ${tenant.nom} » créé ✓ (tenant ${tenant.tenant_id.slice(0, 8)}…)`);
+        } catch (e) {
+          addLog(`⚠ Compte non créé : ${e instanceof Error ? e.message : String(e)}`);
+        }
         // Mode de réplication choisi par la PME (modifiable ensuite dans Sécurité)
         try {
           const msg = await invoke<string>("set_replication_mode", { sync: syncMode });
@@ -235,6 +256,49 @@ export default function Install({ onComplete }: Props) {
           {error && <div className="alert alert-error" style={{ marginBottom: 20 }}>{error}</div>}
 
           <div className="card">
+            {role === "primary" && (
+              <div style={{ marginBottom: 24, paddingBottom: 20, borderBottom: "1px solid var(--border)" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Votre compte entreprise</div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 16 }}>
+                  Généré localement sur votre machine. Aucune donnée n'est envoyée à l'éditeur — votre identité reste souveraine.
+                </div>
+                <div style={{ marginBottom: 14 }}>
+                  <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                    Nom de l'entreprise <span style={{ color: "var(--red)" }}>*</span>
+                  </label>
+                  <input
+                    value={entreprise}
+                    onChange={e => setEntreprise(e.target.value)}
+                    style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                    placeholder="ex. Boutique Salma"
+                  />
+                </div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                      Gérant <span style={{ opacity: 0.6 }}>· optionnel</span>
+                    </label>
+                    <input
+                      value={gerant}
+                      onChange={e => setGerant(e.target.value)}
+                      style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                      placeholder="ex. Salma B."
+                    />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                      Email <span style={{ opacity: 0.6 }}>· optionnel</span>
+                    </label>
+                    <input
+                      value={emailPme}
+                      onChange={e => setEmailPme(e.target.value)}
+                      style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                      placeholder="contact@entreprise.ma"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
             {role === "standby" && (
               <>
                 <div style={{ marginBottom: 20 }}>

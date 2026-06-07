@@ -45,7 +45,11 @@ use crate::failover::EpochGuard;
 
 pub struct AppState {
     pub pool:        PgPool,
-    pub dek:         Dek,
+    /// DEK opérationnelle (écritures du journal). MUTABLE : la rotation de DEK
+    /// (dé-enrôlement) la remplace réellement → un appareil retiré ne peut plus
+    /// déchiffrer les écritures postérieures (critère #9). Le verrou n'est jamais
+    /// tenu au travers d'un `.await` (on clone la DEK puis on relâche).
+    pub dek:         std::sync::RwLock<Dek>,
     pub epoch_guard: EpochGuard,
     /// URL du relais éditeur (optionnel). Si None, le push est désactivé.
     pub relay_url:   Option<String>,
@@ -122,6 +126,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/journal",        get(handle_get_journal))
         .route("/epoch",          get(handle_get_epoch))
         .route("/epoch/promote",  post(handle_promote_epoch))
+        // Gestion du parc (enrôlement / rotation / récupération) — cf. devices.rs
+        .route("/devices",          get(crate::devices::list))
+        .route("/devices/enroll",   post(crate::devices::enroll))
+        .route("/devices/revoke",   post(crate::devices::revoke))
+        .route("/recovery/setup",   post(crate::devices::recovery_setup))
+        .route("/recovery/restore", post(crate::devices::recovery_restore))
+        // Identité du tenant (création de compte) — cf. tenant.rs
+        .route("/tenant",           get(crate::tenant::get))
+        .route("/tenant/bootstrap", post(crate::tenant::bootstrap))
+        // Métier — CRUD Produits & Clients (journalisé) — cf. business.rs
+        .route("/produits",      get(crate::business::list_produits).post(crate::business::upsert_produit))
+        .route("/produits/:id",  axum::routing::delete(crate::business::delete_produit))
+        .route("/clients",       get(crate::business::list_clients).post(crate::business::upsert_client))
+        .route("/clients/:id",   axum::routing::delete(crate::business::delete_client))
         // CORS permissif : le tableau de bord Tauri (origine http://tauri.localhost)
         // interroge ce nœud en cross-origin sur le LAN privé. Sans cet en-tête,
         // le navigateur bloque la lecture de la réponse (dashboard "Hors ligne").
@@ -252,7 +270,9 @@ async fn handle_write(
     let cbor = encode_cbor(&op).map_err(|e| {
         internal_error(format!("sérialisation CBOR : {e}"))
     })?;
-    let blob = encrypt(&cbor, &state.dek);
+    // Clone de la DEK courante (verrou relâché immédiatement, jamais tenu sur un .await).
+    let dek = state.dek.read().map_err(|e| internal_error(format!("verrou DEK : {e}")))?.clone();
+    let blob = encrypt(&cbor, &dek);
 
     // 6. Mise à jour du stock (UPSERT)
     match op_type {
@@ -278,6 +298,9 @@ async fn handle_write(
             .await
             .map_err(internal_error)?;
         }
+        // /write ne traite que le stock (parse_op_type ne renvoie que Sale/StockAdjust).
+        // Le CRUD métier passe par /produits et /clients (cf. business.rs).
+        _ => return Err(bad_request("opération non supportée par /write".into())),
     }
 
     // 7. Journal chiffré append-only
@@ -303,8 +326,10 @@ async fn handle_write(
         let relay_key = relay_key.clone();
         let nonce_hex   = hex::encode(&blob.nonce);
         let ct_hex      = hex::encode(&blob.ciphertext);
+        // tenant_id pour cloisonner le blob au relais « Amane » (vide si compte pas encore créé).
+        let tenant_id = current_tenant_id_or_empty(&state.pool).await;
         tokio::spawn(async move {
-            push_to_relay(&relay_url, &relay_key, seq, &nonce_hex, &ct_hex).await;
+            push_to_relay(&relay_url, &relay_key, &tenant_id, seq, &nonce_hex, &ct_hex).await;
         });
     }
 
@@ -411,11 +436,25 @@ fn bad_request(msg: String) -> (StatusCode, Json<ErrorResponse>) {
     (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: msg }))
 }
 
-/// Push best-effort d'un blob vers le relais éditeur aveugle.
-/// Les erreurs sont loguées mais n'affectent pas le flux principal.
-async fn push_to_relay(relay_url: &str, relay_key: &str, seq: i64, nonce_hex: &str, ct_hex: &str) {
+/// Récupère le tenant_id courant (texte) ou "" si le compte n'est pas encore créé.
+/// Utilisé pour estampiller les blobs poussés au relais mutualisé.
+pub(crate) async fn current_tenant_id_or_empty(pool: &PgPool) -> String {
+    sqlx::query_scalar::<_, Uuid>("SELECT tenant_id FROM tenant WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|u| u.to_string())
+        .unwrap_or_default()
+}
+
+/// Push best-effort d'un blob vers le relais éditeur aveugle « Amane ».
+/// `tenant_id` permet au relais mutualisé de cloisonner les blobs par PME (sans rien
+/// déchiffrer). Les erreurs sont loguées mais n'affectent pas le flux principal.
+pub(crate) async fn push_to_relay(relay_url: &str, relay_key: &str, tenant_id: &str, seq: i64, nonce_hex: &str, ct_hex: &str) {
     let url = format!("{relay_url}/blobs");
     let body = serde_json::json!({
+        "tenant_id":       tenant_id,
         "seq":             seq,
         "blob_nonce":      nonce_hex,
         "blob_ciphertext": ct_hex,

@@ -6,7 +6,10 @@
 //!   LISTEN_ADDR         — adresse d'écoute HTTP (défaut : 0.0.0.0:3000)
 
 mod active;
+mod business;
+mod devices;
 mod failover;
+mod tenant;
 
 use std::sync::Arc;
 
@@ -35,7 +38,10 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("migrations OK");
 
     // ── Chargement de la DEK ──────────────────────────────────────────────────
-    let dek = match std::env::var("SOVEREIGN_DEK_HEX") {
+    // DEK d'amorçage : depuis l'env (ou éphémère). Elle ne sert qu'à initialiser la
+    // génération 1 au tout premier démarrage ; ensuite la DEK courante vient de la base
+    // (table dek_state), pour que les rotations (dé-enrôlement) survivent aux redémarrages.
+    let env_dek = match std::env::var("SOVEREIGN_DEK_HEX") {
         Ok(hex_str) => {
             let bytes = hex::decode(hex_str.trim())
                 .map_err(|e| anyhow::anyhow!("SOVEREIGN_DEK_HEX invalide (hex) : {e}"))?;
@@ -55,6 +61,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // DEK opérationnelle : amorce la génération 1 si besoin, sinon charge la plus récente.
+    let (dek, generation) = devices::load_or_seed_dek(&pool, env_dek).await
+        .map_err(|e| anyhow::anyhow!("chargement DEK (dek_state) : {e}"))?;
+    tracing::info!(generation, "DEK opérationnelle chargée (génération courante)");
+
     // ── Démarrage du serveur ──────────────────────────────────────────────────
     // ── Chargement de l'époque (fencing token) ───────────────────────────────
     let epoch = failover::load_epoch(&pool).await
@@ -69,7 +80,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(relay = %url, "push automatique vers le relais activé");
     }
 
-    let state = Arc::new(active::AppState { pool, dek, epoch_guard, relay_url, relay_key });
+    let state = Arc::new(active::AppState {
+        pool,
+        dek: std::sync::RwLock::new(dek),
+        epoch_guard,
+        relay_url,
+        relay_key,
+    });
     let app   = active::router(state);
 
     let listen_addr = std::env::var("LISTEN_ADDR")

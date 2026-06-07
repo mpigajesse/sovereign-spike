@@ -284,6 +284,8 @@ async fn handle_write(
             .await
             .map_err(internal)?;
         }
+        // Le mode solo ne gère que le stock (CRUD métier hors-périmètre solo).
+        _ => return Err(bad_request("opération non supportée en mode solo".into())),
     }
 
     // 6. Journal chiffré

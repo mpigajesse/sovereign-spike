@@ -8,16 +8,46 @@
 //!
 //! La PME n'a rien à faire manuellement.
 
+use std::collections::HashMap;
 use std::process::{Child, Command};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use sovereign_core::DeviceKeypair;
 use tauri::{Manager, State};
+
+// ── Anti-fenêtre console (Windows) ─────────────────────────────────────────────
+//
+// L'app GUI est compilée avec `windows_subsystem = "windows"` : elle n'a AUCUNE
+// console. Sous Windows, lancer un processus enfant de type console (sidecars
+// node/relais, psql, powershell) depuis un parent sans console fait apparaître
+// une NOUVELLE fenêtre terminal à chaque spawn. Comme le Dashboard interroge
+// `cluster_status` (→ plusieurs psql) toutes les 5 s, des fenêtres clignotaient
+// « en boucle ». Le flag CREATE_NO_WINDOW supprime ces fenêtres parasites.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Applique CREATE_NO_WINDOW sous Windows (no-op ailleurs). Tous les `Command`
+/// du backend passent par ici pour ne jamais ouvrir de console visible.
+fn no_window(cmd: &mut Command) -> &mut Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
 
 // ── État ──────────────────────────────────────────────────────────────────────
 
 struct NodeProcess(Mutex<Option<Child>>);
+
+/// Coffre des paires de clés des « appareils virtuels » créés depuis l'UI pour la
+/// démo d'enrôlement. La clé privée X25519 ne quitte JAMAIS le backend Rust : l'UI
+/// ne reçoit que la clé publique (le « QR ») et un handle = cette clé publique hex.
+/// (Volatile : remis à zéro au redémarrage de l'app — suffisant pour une démo live.)
+struct DeviceVault(Mutex<HashMap<String, DeviceKeypair>>);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StartupStatus {
@@ -113,12 +143,13 @@ async fn start_active_node(
     let relay: &str = if relay_url.trim().is_empty() { "http://127.0.0.1:4000" } else { relay_url.as_str() };
 
     // Lancer le nœud actif
-    let child = Command::new(&bin)
-        .env("DATABASE_URL",      if db_url.is_empty() { "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active" } else { &db_url })
+    let mut cmd = Command::new(&bin);
+    cmd.env("DATABASE_URL",      if db_url.is_empty() { "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active" } else { &db_url })
         .env("LISTEN_ADDR",       "0.0.0.0:3000")
         .env("SOVEREIGN_DEK_HEX", dek)
         .env("RELAY_URL",         relay)
-        .env("RELAY_API_KEY",     if relay_key.is_empty() { "sovereign-spike-relay-key-2026" } else { &relay_key })
+        .env("RELAY_API_KEY",     if relay_key.is_empty() { "sovereign-spike-relay-key-2026" } else { &relay_key });
+    let child = no_window(&mut cmd)
         .spawn()
         .map_err(|e| format!("Impossible de démarrer {bin}: {e}"))?;
 
@@ -265,10 +296,11 @@ async fn start_solo_node(
         .map(|d| { let _ = std::fs::create_dir_all(&d); d.join("sovereign_solo.db").to_string_lossy().to_string() })
         .unwrap_or_else(|| "sovereign_solo.db".to_string());
 
-    let child = Command::new(&bin)
-        .env("SOLO_DB_PATH",      &db_path)
+    let mut cmd = Command::new(&bin);
+    cmd.env("SOLO_DB_PATH",      &db_path)
         .env("LISTEN_ADDR",       "127.0.0.1:3000")
-        .env("SOVEREIGN_DEK_HEX", &dek_hex)
+        .env("SOVEREIGN_DEK_HEX", &dek_hex);
+    let child = no_window(&mut cmd)
         .spawn()
         .map_err(|e| format!("Impossible de démarrer le nœud solo : {e}"))?;
 
@@ -306,7 +338,7 @@ fn find_solo_binary(app: &tauri::AppHandle) -> Option<String> {
             .join("sovereign-node-solo.exe");
         if p.exists() { return Some(p.to_string_lossy().to_string()); }
     }
-    if Command::new("sovereign-node-solo").arg("--help").output().is_ok() {
+    if no_window(Command::new("sovereign-node-solo").arg("--help")).output().is_ok() {
         return Some("sovereign-node-solo".into());
     }
     None
@@ -339,10 +371,11 @@ async fn start_relay_node(
         .map(|d| { let _ = std::fs::create_dir_all(&d); d.join("sovereign_relay.db").to_string_lossy().to_string() })
         .unwrap_or_else(|| "sovereign_relay.db".to_string());
 
-    let child = Command::new(&bin)
-        .env("RELAY_LISTEN_ADDR", "0.0.0.0:4000")
+    let mut cmd = Command::new(&bin);
+    cmd.env("RELAY_LISTEN_ADDR", "0.0.0.0:4000")
         .env("RELAY_API_KEY",     "sovereign-spike-relay-key-2026")
-        .env("RELAY_DB_PATH",     &db_path)
+        .env("RELAY_DB_PATH",     &db_path);
+    let child = no_window(&mut cmd)
         .spawn()
         .map_err(|e| format!("Impossible de démarrer le relais : {e}"))?;
 
@@ -379,7 +412,7 @@ fn find_relay_binary(app: &tauri::AppHandle) -> Option<String> {
             .join("sovereign-relay.exe");
         if p.exists() { return Some(p.to_string_lossy().to_string()); }
     }
-    if Command::new("sovereign-relay").arg("--help").output().is_ok() {
+    if no_window(Command::new("sovereign-relay").arg("--help")).output().is_ok() {
         return Some("sovereign-relay".into());
     }
     None
@@ -425,12 +458,15 @@ async fn run_standby_setup(primary_ip: String, app: tauri::AppHandle) -> Result<
     // Lancer le script. Il s'auto-élève (UAC) : une fenêtre admin s'ouvrira et
     // exécutera la configuration. On lance sans capturer (la fenêtre élevée est
     // indépendante) et on rend la main immédiatement.
-    Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy", "Bypass",
-            "-File", tmp.to_str().unwrap_or(""),
-        ])
+    // CREATE_NO_WINDOW sur le lanceur : le script s'auto-élève (UAC) et ouvre
+    // sa PROPRE fenêtre admin visible — inutile d'afficher la console du lanceur.
+    let mut ps = Command::new("powershell");
+    ps.args([
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", tmp.to_str().unwrap_or(""),
+    ]);
+    no_window(&mut ps)
         .spawn()
         .map_err(|e| format!("Impossible de lancer PowerShell : {e}"))?;
 
@@ -489,8 +525,7 @@ fn find_binary(app: &tauri::AppHandle) -> Option<String> {
 }
 
 fn which_sovereign() -> Option<()> {
-    Command::new("sovereign-node-active")
-        .arg("--help")
+    no_window(Command::new("sovereign-node-active").arg("--help"))
         .output()
         .ok()
         .map(|_| ())
@@ -505,13 +540,56 @@ async fn check_pg_available() -> bool {
 
 async fn ping_node(url: &str) -> bool {
     let health_url = format!("{url}/health");
-    reqwest::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
-        .ok()
-        .map(|c| c.get(&health_url).send())
-        .map(|f| tokio::runtime::Handle::current().block_on(async { f.await.map(|r| r.status().is_success()).unwrap_or(false) }))
+    else {
+        return false;
+    };
+    client
+        .get(&health_url)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+// ── Gestion du parc côté UI : crypto d'appareil (enrôlement / preuves) ─────────
+//
+// Ces commandes exécutent la crypto sodiumoxide (impossible en JS) pour rendre la
+// démo d'enrôlement/rotation/récupération vérifiable depuis le tableau de bord.
+
+/// Crée un « nouvel appareil » : génère sa paire X25519 et renvoie sa clé publique
+/// (le « QR » à présenter au nœud actif pour l'enrôlement). La clé privée reste ici.
+#[tauri::command]
+fn dev_generate_keypair(vault: State<'_, DeviceVault>) -> Result<String, String> {
+    let kp = DeviceKeypair::generate();
+    let public_hex = kp.public_hex();
+    vault.0.lock().map_err(|e| e.to_string())?.insert(public_hex.clone(), kp);
+    Ok(public_hex)
+}
+
+/// L'appareil (identifié par sa clé publique) ouvre la sealed box reçue à l'enrôlement
+/// et récupère la DEK (hex). Preuve du critère #8 : la clé n'a jamais transité en clair.
+#[tauri::command]
+fn dev_unwrap_dek(
+    public_hex: String,
+    sealed_hex: String,
+    vault:      State<'_, DeviceVault>,
+) -> Result<String, String> {
+    let guard = vault.0.lock().map_err(|e| e.to_string())?;
+    let kp = guard
+        .get(&public_hex)
+        .ok_or_else(|| "appareil inconnu (clé privée absente du coffre local)".to_string())?;
+    kp.unwrap_dek_hex(&sealed_hex).map_err(|e| e.to_string())
+}
+
+/// Teste si une DEK (hex) déchiffre un blob (nonce + ciphertext hex).
+/// Preuve du critère #9 : l'ancienne DEK d'un appareil dé-enrôlé échoue sur un blob
+/// écrit APRÈS la rotation, alors qu'un appareil restant (nouvelle DEK) réussit.
+#[tauri::command]
+fn try_decrypt_blob(dek_hex: String, nonce_hex: String, ct_hex: String) -> bool {
+    sovereign_core::try_decrypt_hex(&dek_hex, &nonce_hex, &ct_hex)
 }
 
 // ── Administration du cluster (failover manuel + mode de réplication) ──────────
@@ -530,7 +608,7 @@ fn find_psql() -> Option<String> {
             return Some(p);
         }
     }
-    if Command::new("psql").arg("--version").output().is_ok() {
+    if no_window(Command::new("psql").arg("--version")).output().is_ok() {
         return Some("psql".into());
     }
     None
@@ -541,10 +619,11 @@ fn psql_scalar(sql: &str) -> Result<String, String> {
     let psql = find_psql().ok_or_else(|| "psql introuvable (PostgreSQL non installé ?)".to_string())?;
     // Mot de passe superuser du spike (documenté, non-production).
     let pw = std::env::var("SOVEREIGN_PG_ADMIN_PW").unwrap_or_else(|_| "admin".to_string());
-    let out = Command::new(&psql)
-        .env("PGPASSWORD", pw)
+    let mut cmd = Command::new(&psql);
+    cmd.env("PGPASSWORD", pw)
         .args(["-h", "127.0.0.1", "-U", "postgres", "-d", "sovereign_active",
-               "-t", "-A", "-c", sql])
+               "-t", "-A", "-c", sql]);
+    let out = no_window(&mut cmd)
         .output()
         .map_err(|e| format!("exécution psql : {e}"))?;
     if !out.status.success() {
@@ -635,9 +714,13 @@ async fn promote_node() -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // libsodium doit être initialisé avant toute opération crypto (gestion du parc).
+    let _ = sovereign_core::crypto::init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(NodeProcess(Mutex::new(None)))
+        .manage(DeviceVault(Mutex::new(HashMap::new())))
         .setup(|_app| {
             // Pas d'auto-start ici : le démarrage du nœud (actif / solo / relais)
             // est piloté par le frontend selon le RÔLE choisi (cf. App.tsx), avec
@@ -664,6 +747,9 @@ pub fn run() {
             cluster_status,
             set_replication_mode,
             promote_node,
+            dev_generate_keypair,
+            dev_unwrap_dek,
+            try_decrypt_blob,
         ])
         .run(tauri::generate_context!())
         .expect("Erreur lors du démarrage Tauri");

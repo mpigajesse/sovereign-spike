@@ -13,19 +13,39 @@ use sha2::{Sha256, Digest};
 use thiserror::Error;
 use uuid::Uuid;
 
-/// Nature de l'opération métier (minimal pour le spike).
+/// Nature de l'opération métier.
+///
+/// `Sale` / `StockAdjust` : opérations de stock (invariant fort anti-survente) — inchangées.
+/// `*Upsert` / `*Delete`  : CRUD métier générique (produits, clients) — sans invariant.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum OpType {
     Sale,
     StockAdjust,
+    ProduitUpsert,
+    ProduitDelete,
+    ClientUpsert,
+    ClientDelete,
 }
 
-/// Contenu métier minimal d'une opération (spike).
+/// Contenu d'une opération de STOCK (item + quantité). Inchangé — l'anti-survente en dépend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payload {
     pub item_id:  String,
     pub quantity: i64,
+}
+
+/// Contenu d'une opération CRUD métier GÉNÉRIQUE.
+///
+/// Le moteur ne connaît pas la sémantique de `fields` (sku, nom, prix…) : il transporte
+/// un simple dictionnaire de champs. Le nœud actif les interprète en les rangeant dans
+/// le schéma `business`. C'est ce qui rend le moteur agnostique au domaine (framework).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BusinessData {
+    /// Identifiant de l'entité métier (UUID en texte) — clé de l'upsert/delete.
+    pub entity_id: String,
+    /// Champs métier (clé → valeur en texte). Vide pour un delete.
+    pub fields: std::collections::BTreeMap<String, String>,
 }
 
 /// Une opération du journal (§0.1 Stack).
@@ -41,6 +61,11 @@ pub struct Operation {
     pub schema_version: u8,
     /// SHA-256 du CBOR de l'entrée précédente (hex). "genesis" pour la première entrée.
     pub prev_hash:      String,
+    /// Données CRUD métier (produits, clients). `None` pour les opérations de stock.
+    /// `skip_serializing_if` : une opération de stock se sérialise EXACTEMENT comme avant
+    /// (aucun champ ajouté) → les blobs existants et la chaîne de hash restent valides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub business:       Option<BusinessData>,
 }
 
 impl Operation {
@@ -56,6 +81,7 @@ impl Operation {
             payload,
             schema_version: Self::CURRENT_SCHEMA,
             prev_hash: Self::GENESIS_HASH.to_string(),
+            business: None,
         }
     }
 
@@ -70,6 +96,26 @@ impl Operation {
             payload,
             schema_version: Self::CURRENT_SCHEMA,
             prev_hash: hash,
+            business: None,
+        }
+    }
+
+    /// Construit une opération CRUD métier (produit/client), chaînée à la précédente.
+    /// `payload` est neutre (item_id vide, quantity 0) — le contenu est dans `business`.
+    pub fn new_business(seq: u64, op_type: OpType, business: BusinessData, prev_cbor: Option<&[u8]>) -> Self {
+        let prev_hash = match prev_cbor {
+            Some(cbor) => hex::encode(Sha256::digest(cbor)),
+            None => Self::GENESIS_HASH.to_string(),
+        };
+        Self {
+            seq,
+            op_type,
+            op_id: Uuid::new_v4(),
+            ts: chrono::Utc::now().timestamp(),
+            payload: Payload { item_id: String::new(), quantity: 0 },
+            schema_version: Self::CURRENT_SCHEMA,
+            prev_hash,
+            business: Some(business),
         }
     }
 }
@@ -361,6 +407,47 @@ mod tests {
             !bytes_as_str.contains("CONFIDENTIEL"),
             "le journal sur disque ne doit contenir aucun clair"
         );
+    }
+
+    #[test]
+    fn operation_business_crud_journalisee_et_chainee() {
+        // LOT 2 : une opération CRUD métier est chiffrée, journalisée, et la chaîne de
+        // hash reste valide même mélangée à des opérations de stock.
+        let dek = setup();
+        let mut journal = MemoryJournal::new();
+
+        // 1. stock (genesis)
+        let op1 = Operation::new(1, OpType::StockAdjust, Payload { item_id: "PROD-1".into(), quantity: 10 });
+        journal.append(&op1, &dek).expect("append stock");
+
+        // 2. création produit (CRUD métier, chaînée)
+        let prev = journal.last_cbor().unwrap().to_vec();
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("sku".to_string(), "PROD-1".to_string());
+        fields.insert("nom".to_string(), "Pantalon".to_string());
+        fields.insert("prix_cents".to_string(), "1499".to_string());
+        let op2 = Operation::new_business(2, OpType::ProduitUpsert,
+            BusinessData { entity_id: "prod-uuid-1".into(), fields }, Some(&prev));
+        journal.append(&op2, &dek).expect("append produit");
+
+        // 3. vente (stock, chaînée)
+        let prev = journal.last_cbor().unwrap().to_vec();
+        let op3 = Operation::new_chained(3, OpType::Sale, Payload { item_id: "PROD-1".into(), quantity: 2 }, &prev);
+        journal.append(&op3, &dek).expect("append vente");
+
+        // La chaîne reste intègre malgré le mélange stock + CRUD
+        journal.verify_chain(&dek).expect("chaîne intègre stock+CRUD");
+
+        // Le contenu métier est bien récupérable au rejeu
+        let ops = journal.replay(&dek).expect("replay");
+        let produit = &ops[1];
+        assert_eq!(produit.op_type, OpType::ProduitUpsert);
+        let biz = produit.business.as_ref().expect("données business présentes");
+        assert_eq!(biz.fields.get("nom").map(String::as_str), Some("Pantalon"));
+        assert_eq!(biz.fields.get("prix_cents").map(String::as_str), Some("1499"));
+
+        // Une opération de stock n'a PAS de données business
+        assert!(ops[0].business.is_none(), "une op de stock ne porte pas de business");
     }
 
     #[test]

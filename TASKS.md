@@ -92,7 +92,9 @@
 
 - ✅ Endpoints : `/write`, `/stock`, `/journal`, `/epoch`, `/epoch/promote`
 - ✅ `DeviceRegistry` avec enrôlement, révocation, rotation DEK
-- ⬜ Endpoint `/enroll` HTTP (enrôlement via API REST — architecture en place)
+- ✅ Endpoints HTTP parc : `/devices`, `/devices/enroll`, `/devices/revoke`,
+  `/recovery/setup`, `/recovery/restore` — 2026-06-06 (`crates/node/src/devices.rs`)
+- ✅ DEK opérationnelle MUTABLE par génération (`dek_state`) — rotation réelle au dé-enrôlement
 - ⬜ Compactage journal (snapshot + reset — low priority)
 
 ### 1.5 Séparation stockage (architecture hexagonale) ✅ LIVRÉ 2026-06-04
@@ -200,6 +202,54 @@
 
 ---
 
+## COUCHE MÉTIER multi-tenant (architecture cible HA SaaS) — en cours
+
+> Réf. : `officiel-docs/Architecture Haute Disponibilité SaaS.md` +
+> `docs/metier/plan-implementation.md`. Démo : `docs/demo/metier-demo.md`.
+
+| Lot | Contenu | État |
+|-----|---------|------|
+| LOT 1 | Création de compte (tenant_id + DEK générés localement, auto-souverain) | ✅ 0.1.11 |
+| LOT 2 | Schéma `business` + CRUD Produits & Clients (journalisé, chiffré, générique) | ✅ 0.1.11 |
+| LOT 3 | Ventes / anti-survente (invariant fort) | ✅ déjà prouvé (inchangé) |
+| LOT 4 | Relais « Amane » multi-tenant (blobs séparés par tenant_id) | ✅ 0.1.12 |
+| LOT 5 | Topologie actif + 2 passifs + failover automatique quorum | ⬜ reporté |
+| LOT 6 | Plan de contrôle éditeur (licences, MAJ) | ⬜ futur hors-spike |
+
+Décisions actées : D1 séparation non-disruptive (`business` schéma, moteur reste `public`),
+D2 atomicité préservée (même base), D3 tenant_id porté, D4 compte auto-souverain,
+D5 métier minimal + une règle forte. Journal étendu en générique (`BusinessData`),
+rétrocompatible (blobs stock inchangés au bit près). Tests : 57/57.
+
+---
+
+## État réel des 10 critères d'acceptation officiels (§7.4 du cadrage)
+
+> Distinction honnête : **prouvé en live** (démontrable avec de vraies machines) vs
+> **code + tests** (logique présente et testée, pas encore un flux runtime complet) vs
+> **manquant**.
+
+| Critère §7.4 | État | Preuve |
+|---|---|---|
+| 1. Écritures concurrentes sans survente | ✅ live | SERIALIZABLE + FOR UPDATE, 409 |
+| 2. Coupé du serveur → lecture OK, écriture refusée | ✅ par construction | passif sans `/write` |
+| 3. Confirmation après réplication (synchrone) | ✅ live | `synchronous_standby_names` |
+| 4a. Failover **manuel** sans perte | ✅ live | promotion standby zéro perte |
+| 4b. Failover **automatique** par quorum (≥3) | ❌ manquant | Patroni/Raft non déployé |
+| 5. Pas de split-brain sous coupure | 🟡 partiel | fencing (après coup) ✅ ; prévention quorum ❌ |
+| 6. Retour ancien actif → fencé | ✅ live | 503 si époque périmée |
+| 7. Relais → que du chiffré | ✅ live | blobs opaques, zéro dép. crypto |
+| 8. Enrôlement sans exposer la clé | ✅ live (0.1.10) | page Parc : sealed box + unwrap |
+| 9. Dé-enrôlé ne peut plus déchiffrer | ✅ live (0.1.10) | rotation DEK + preuve sur blob réel |
+| 10. Retrait → recalcul quorum + alerte | ✅ live (0.1.10) | bannière quorum < 3 |
+| 11. Perte machines → code de récupération | ✅ live (0.1.10) | Argon2id setup/restore |
+
+**Optionnel non implémenté :** partage de secret Shamir (§5.6 — explicitement optionnel).
+
+Démo : `docs/demo/gestion-parc-demo.md`.
+
+---
+
 ## Résumé de progression
 
 | Phase | Avancement | Statut |
@@ -208,25 +258,20 @@
 | Phase 1 — Cœur Rust production | 98% | ✅ Validé 2026-06-04 (+ séparation SQLite/PG) |
 | Phase 2 — Relais + multi-sites | 85% | ✅ Validé 2026-06-04 |
 | Phase 3 — Installeur one-click | 70% | ✅ Script PowerShell créé |
-| Phase 3 — Frontend Tauri | 85% | ✅ App complète, build OK, packaging à finaliser |
+| Phase 3 — Frontend Tauri | 90% | ✅ App + gestion du parc (0.1.10), build OK |
 | Phase 3 — Mobile UniFFI | 0% | ⬜ Architecture définie, hors-scope PFE immédiat |
+| Gestion du parc (#8–#11) | 100% | ✅ Livré 0.1.10 — 2026-06-06 |
+| Failover automatique quorum (#4b) | 0% | ⬜ Patroni/etcd — seul vrai manque §7.4 |
 
 ---
 
 ## Prochaine tâche immédiate
 
-**Phase 1.3 — Bascule manuelle + fencing :**  
-Tester la promotion du standby Ubuntu en primary, incrémenter l'époque, et vérifier que l'ancien actif Windows est bloqué à l'époque inférieure.
+**Valider la gestion du parc (0.1.10) sur le PC primary** puis décider de la suite :
+1. Réinstaller `Sovereign Data Agent_0.1.10_x64-setup.exe` (rebuild sidecar nœud inclus).
+2. Suivre `docs/demo/gestion-parc-demo.md` (enrôlement → vente → dé-enrôlement → preuve #9 → récupération).
 
-```bash
-# Sur Ubuntu — promouvoir le standby
-sudo -u postgres pg_ctl promote -D /var/lib/postgresql/18/main
-```
-
-```powershell
-# Sur Windows — vérifier que l'actif est fencé
-Invoke-RestMethod http://192.168.200.1:3000/write -Method POST `
-    -ContentType "application/json" `
-    -Body '{"op_type":"sale","item_id":"TEST","quantity":1}'
-# Attendu : 409 ou 503 (époque périmée)
-```
+**Choix structurant restant** (un seul vrai manque §7.4) :
+- **Failover automatique par quorum** (#4b) via Patroni + etcd sur les 3 nœuds — OU
+  l'assumer comme arbitrage (manuel prouvé, automatique = étape Patroni identifiée) et
+  passer à la couche **métier réelle** (le socle est prouvé).

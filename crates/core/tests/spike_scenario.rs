@@ -228,6 +228,7 @@ fn critere_07_replica_sqlite_applique_operations() {
         match op.op_type {
             OpType::StockAdjust => stock_replica += op.payload.quantity,
             OpType::Sale        => stock_replica -= op.payload.quantity,
+            _                   => {} // opérations CRUD métier : sans effet sur le stock
         }
     }
     // 100 - 15 - 5 = 80
@@ -413,6 +414,7 @@ fn scenario_e2e_pipeline_complet() {
                 .fold(0, |acc, o| match o.op_type {
                     OpType::StockAdjust => acc + o.payload.quantity,
                     OpType::Sale        => acc - o.payload.quantity,
+                    _                   => acc,
                 });
             assert!(stock_item >= *qty,
                 "invariant violé pour {item} : dispo={stock_item}, demandé={qty}");
@@ -438,12 +440,14 @@ fn scenario_e2e_pipeline_complet() {
         .fold(0, |acc, o| match o.op_type {
             OpType::StockAdjust => acc + o.payload.quantity,
             OpType::Sale        => acc - o.payload.quantity,
+            _                   => acc,
         });
     let stock_chemise: i64 = ops_repliques.iter()
         .filter(|o| o.payload.item_id == "CHEMISE-M")
         .fold(0, |acc, o| match o.op_type {
             OpType::StockAdjust => acc + o.payload.quantity,
             OpType::Sale        => acc - o.payload.quantity,
+            _                   => acc,
         });
 
     assert_eq!(stock_pantalon, 35, "passif: PANTALON-L = 35");

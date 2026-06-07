@@ -48,6 +48,15 @@ async function post<T>(url: string, body: unknown): Promise<T> {
   return r.json();
 }
 
+async function del<T>(url: string): Promise<T> {
+  const r = await fetch(url, { method: "DELETE", signal: AbortSignal.timeout(5000) });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+    throw new Error(err.error ?? `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface HealthStatus {
@@ -83,13 +92,67 @@ export interface JournalEntry {
   blob_ciphertext: string;
 }
 
+// ── Gestion du parc (enrôlement / rotation / récupération) ──────────────────────
+
+export interface EnrolledDevice {
+  device_id:   string;
+  label:       string;
+  sealed_dek:  string; // sealed box hex (opaque)
+  enrolled_at: string;
+}
+
+export interface DeviceList {
+  devices:            EnrolledDevice[];
+  count:              number;
+  generation:         number;
+  auto_failover_safe: boolean;
+}
+
+export interface EnrollResponse {
+  device_id:  string;
+  sealed_dek: string;
+  generation: number;
+}
+
+export interface RevokeResponse {
+  revoked:            string;
+  new_generation:     number;
+  remaining:          number;
+  auto_failover_safe: boolean;
+  quorum_warning:     string | null;
+}
+
+// ── Tenant (création de compte) ─────────────────────────────────────────────────
+
+export interface Tenant {
+  tenant_id:  string;
+  nom:        string;
+  gerant:     string;
+  email:      string;
+  created_at: string;
+}
+
+export interface Produit {
+  id:         string;
+  sku:        string;
+  nom:        string;
+  prix_cents: number;
+}
+
+export interface Client {
+  id:        string;
+  nom:       string;
+  email:     string;
+  telephone: string;
+}
+
 // ── API calls ─────────────────────────────────────────────────────────────────
 
 export const api = {
   // Santé des 3 nœuds
   async healthActive():  Promise<string>           { return fetch(`${BASE()}/health`, { signal: AbortSignal.timeout(3000) }).then(r => r.text()); },
   async healthPassive(): Promise<string>           { return fetch(`${PASSIVE()}/health`, { signal: AbortSignal.timeout(3000) }).then(r => r.text()); },
-  async healthRelay():   Promise<{role:string; status:string; blob_count:number}> { return get(`${RELAY()}/health`); },
+  async healthRelay():   Promise<{role:string; status:string; blob_count:number; tenant_count?:number}> { return get(`${RELAY()}/health`); },
 
   // Stock
   async getStock(item_id: string): Promise<StockItem> { return get(`${BASE()}/stock/${item_id}`); },
@@ -111,4 +174,43 @@ export const api = {
   // Sync passif
   async syncStatus(): Promise<SyncStatus> { return get(`${PASSIVE()}/sync/status`); },
   async passiveStock(item_id: string): Promise<StockItem> { return get(`${PASSIVE()}/stock/${item_id}`); },
+
+  // Gestion du parc (sur le nœud actif)
+  async listDevices(): Promise<DeviceList> { return get(`${BASE()}/devices`); },
+  async enrollDevice(public_key: string, label: string): Promise<EnrollResponse> {
+    return post(`${BASE()}/devices/enroll`, { public_key, label });
+  },
+  async revokeDevice(device_id: string): Promise<RevokeResponse> {
+    return post(`${BASE()}/devices/revoke`, { device_id });
+  },
+  async recoverySetup(passphrase: string): Promise<{ status: string }> {
+    return post(`${BASE()}/recovery/setup`, { passphrase });
+  },
+  async recoveryRestore(passphrase: string): Promise<{ dek_hex: string; matches_current: boolean }> {
+    return post(`${BASE()}/recovery/restore`, { passphrase });
+  },
+
+  // Tenant (création de compte / identité)
+  async tenantBootstrap(nom: string, gerant: string, email: string): Promise<Tenant> {
+    return post(`${BASE()}/tenant/bootstrap`, { nom, gerant, email });
+  },
+  async getTenant(): Promise<Tenant> { return get(`${BASE()}/tenant`); },
+
+  // Métier — Produits
+  async listProduits(): Promise<Produit[]> { return get(`${BASE()}/produits`); },
+  async upsertProduit(p: { id?: string; sku: string; nom: string; prix_cents: number }): Promise<Produit> {
+    return post(`${BASE()}/produits`, p);
+  },
+  async deleteProduit(id: string): Promise<{ deleted: string }> {
+    return del(`${BASE()}/produits/${id}`);
+  },
+
+  // Métier — Clients
+  async listClients(): Promise<Client[]> { return get(`${BASE()}/clients`); },
+  async upsertClient(c: { id?: string; nom: string; email: string; telephone: string }): Promise<Client> {
+    return post(`${BASE()}/clients`, c);
+  },
+  async deleteClient(id: string): Promise<{ deleted: string }> {
+    return del(`${BASE()}/clients/${id}`);
+  },
 };

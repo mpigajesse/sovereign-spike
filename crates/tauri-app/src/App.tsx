@@ -5,17 +5,23 @@ import Startup  from "./pages/Startup";
 import Install  from "./pages/Install";
 import Dashboard from "./pages/Dashboard";
 import Stock     from "./pages/Stock";
+import Produits  from "./pages/Produits";
+import Clients   from "./pages/Clients";
 import Journal   from "./pages/Journal";
 import Securite  from "./pages/Securite";
+import Parc      from "./pages/Parc";
 import Settings  from "./pages/Settings";
 
-type Page = "dashboard" | "stock" | "journal" | "securite" | "settings";
+type Page = "dashboard" | "produits" | "clients" | "stock" | "journal" | "securite" | "parc" | "settings";
 
 const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "dashboard", label: "Tableau de bord",  icon: "◈" },
+  { id: "produits",  label: "Produits",          icon: "⊠" },
+  { id: "clients",   label: "Clients",           icon: "☻" },
   { id: "stock",     label: "Gestion du stock", icon: "⊟" },
   { id: "journal",   label: "Journal chiffré",  icon: "⊞" },
   { id: "securite",  label: "Sécurité",          icon: "⊡" },
+  { id: "parc",      label: "Gestion du parc",   icon: "⊕" },
   { id: "settings",  label: "Configuration",     icon: "⚙" },
 ];
 
@@ -40,7 +46,7 @@ export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
   const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
-  const [version,  setVersion]  = useState("0.1.8");
+  const [version,  setVersion]  = useState("0.1.12");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {
@@ -174,8 +180,16 @@ export default function App() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Indicateur de rôle */}
+        {/* Compte entreprise (tenant) + rôle de cette machine */}
         <div style={{ padding: "12px 20px", borderTop: "1px solid var(--border)" }}>
+          {localStorage.getItem("sovereign_tenant_nom") && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Compte</div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: "var(--accent2)" }}>
+                ⬡ {localStorage.getItem("sovereign_tenant_nom")}
+              </div>
+            </div>
+          )}
           <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 4 }}>Rôle de cette machine</div>
           <span className={`badge badge-${roleBadge.color}`} style={{ fontSize: 11 }}>
             {roleBadge.label}
@@ -207,9 +221,12 @@ export default function App() {
 
       <main className="main">
         {page === "dashboard" && <Dashboard />}
+        {page === "produits"  && <Produits />}
+        {page === "clients"   && <Clients />}
         {page === "stock"     && <Stock />}
         {page === "journal"   && <Journal />}
         {page === "securite"  && <Securite />}
+        {page === "parc"      && <Parc />}
         {page === "settings"  && <Settings />}
       </main>
     </div>
