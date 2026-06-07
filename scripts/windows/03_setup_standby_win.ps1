@@ -83,15 +83,30 @@ if (-not $conn) {
 Write-Host "  OK - primary joignable"
 
 # ---- Creer le slot de replication sur le primary ----------------------------
+# NOTE: "replication" est une pseudo-base PostgreSQL qui bascule la connexion
+# en mode protocole de replication (CREATE_REPLICATION_SLOT / START_REPLICATION
+# uniquement) - le SQL classique comme "SELECT pg_create_physical_replication_slot(...)"
+# y echoue avec une erreur de syntaxe, silencieusement avalee par l'ancien
+# try/catch (psql ne leve pas d'exception PowerShell). D'ou l'echec differe de
+# pg_basebackup ("le slot n'existe pas") malgre le message "cree" trompeur.
+# Fix : connexion normale a "postgres" (le role 'replicator' a l'attribut
+# REPLICATION, suffisant pour appeler la fonction en SQL classique), et
+# verification explicite d'existence + code de sortie.
 Write-Host ""
 Write-Host "[2b] Creation du slot de replication '$PG_SLOT' sur le primary..." -ForegroundColor Yellow
 $env:PGPASSWORD = "replicator_spike"
-try {
-    & $psql -U replicator -h $PRIMARY_IP -p $PRIMARY_PORT -d "replication" `
-        -c "SELECT pg_create_physical_replication_slot('$PG_SLOT');" 2>&1 | Out-Null
-    Write-Host "  Slot '$PG_SLOT' cree (ou deja existant)"
-} catch {
-    Write-Host "  Slot peut-etre deja existant - OK" -ForegroundColor Yellow
+$slotExists = & $psql -U replicator -h $PRIMARY_IP -p $PRIMARY_PORT -d "postgres" -t -A `
+    -c "SELECT 1 FROM pg_replication_slots WHERE slot_name = '$PG_SLOT';"
+if ($slotExists.Trim() -eq "1") {
+    Write-Host "  Slot '$PG_SLOT' existe deja - OK"
+} else {
+    & $psql -U replicator -h $PRIMARY_IP -p $PRIMARY_PORT -d "postgres" `
+        -c "SELECT pg_create_physical_replication_slot('$PG_SLOT');"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Echec de creation du slot '$PG_SLOT' sur le primary (code $LASTEXITCODE)"
+        exit 1
+    }
+    Write-Host "  Slot '$PG_SLOT' cree." -ForegroundColor Green
 }
 
 # ---- Arreter PostgreSQL local -----------------------------------------------
