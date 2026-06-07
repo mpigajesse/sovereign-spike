@@ -28,10 +28,8 @@ if (-not $isAdmin) {
 
 $PRIMARY_IP   = "192.168.200.1"
 $PRIMARY_PORT = "5432"
-$STANDBY_NAME = "sovereign_standby_win"
 $PG_BIN       = "C:\Program Files\PostgreSQL\18\bin"
 $PG_DATA      = "C:\Program Files\PostgreSQL\18\data"
-$PG_SLOT      = "sovereign_slot_win"
 
 # Adresse "primary:port" assemblee sans piege de scope PowerShell
 $PRIMARY_ADDR = "${PRIMARY_IP}:${PRIMARY_PORT}"
@@ -45,6 +43,17 @@ if (-not $STANDBY_IP) {
     Write-Error "Aucune adresse 192.168.200.x trouvee. Verifier la connexion VMnet1."
     exit 1
 }
+
+# ---- Identite UNIQUE du standby (derivee du dernier octet de l'IP) ----------
+# CRITIQUE pour l'architecture "2 passifs" : chaque standby DOIT avoir un slot
+# de replication et un application_name DISTINCTS, sinon deux VMs lances avec ce
+# script entreraient en collision (meme slot = un seul standby alimente, meme
+# application_name = ambigu dans pg_stat_replication / synchronous_standby_names).
+# Le dernier octet de l'IP (ex : .2 -> 2, .3 -> 3) est unique par machine et
+# survit a l'auto-elevation UAC (pas de parametre a re-transmettre).
+$OCTET        = $STANDBY_IP.Split('.')[-1]
+$STANDBY_NAME = "sovereign_standby_$OCTET"
+$PG_SLOT      = "sovereign_slot_$OCTET"
 
 Write-Host "=== Sovereign-Spike :: Setup PostgreSQL STANDBY (Windows 11 VM) ===" -ForegroundColor Cyan
 Write-Host "Primary : $PRIMARY_ADDR"

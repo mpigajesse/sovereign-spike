@@ -151,12 +151,48 @@ quorum NON atteint (minorité ou partition) — promotion refusée (anti-split-b
   manuelle : `pg_basebackup` depuis le nouveau primary. C'est le comportement
   attendu d'un cluster actif/passif — la reconstruction d'un nœud déchu n'est
   jamais automatique sans risque.
+- Le **2ᵉ passif (VM2) doit aussi être réintégré manuellement** après une
+  bascule : il restait standby de l'ancien primary (mort), donc il faut le
+  re-pointer vers le nouveau primary (VM1) par `pg_basebackup`. En attendant,
+  son superviseur **détecte la promotion de VM1** et **s'abstient** de toute
+  élection (pas de double-promotion).
 - Le superviseur suppose que la machine promue peut servir un nœud actif local
   sur `:3000` (base PostgreSQL fraîchement promue).
 - Cluster validé à **3 nœuds** (majorité = 2). La logique de quorum est générique
   (`majority(n) = n/2 + 1`) et couverte par tests unitaires.
 
-## 8. Tests
+## 7bis. Garde-fous anti-split-brain (récapitulatif)
+
+| Situation | Mécanisme | Effet |
+|---|---|---|
+| Partition réseau, nœud en minorité | quorum (majorité stricte) | refuse de se promouvoir |
+| Ancien primary qui revient | fencing par époque | 503 sur écriture (époque obsolète) |
+| 2ᵉ standby après promotion du 1ᵉʳ | sondage des pairs + un primary ne vote pas | abandon de l'élection (pas de 2ᵉ primary) |
+| Nouveau primary bloqué en sync | relâchement auto de `synchronous_standby_names` | écritures non bloquées |
+
+## 8. Deux passifs : slots de réplication distincts (CRITIQUE)
+
+L'architecture officielle impose **2 nœuds passifs** par cluster. Chaque standby
+DOIT avoir un **slot de réplication** et un **`application_name` distincts** sur
+le primary, sinon les deux VMs entrent en collision.
+
+`03_setup_standby_win.ps1` dérive automatiquement ces identifiants du **dernier
+octet de l'IP locale** :
+- VM 192.168.200.**2** → slot `sovereign_slot_2`, name `sovereign_standby_2`
+- VM 192.168.200.**3** → slot `sovereign_slot_3`, name `sovereign_standby_3`
+
+Vérification sur le primary après configuration des 2 standbys :
+```powershell
+psql -U postgres -d sovereign_active -c `
+  "SELECT application_name, client_addr, state, sync_state FROM pg_stat_replication;"
+# -> doit afficher DEUX lignes : sovereign_standby_2 et sovereign_standby_3
+```
+
+La réplication synchrone (`synchronous_standby_names = '*'`) attend l'accusé d'**au
+moins un** des deux passifs → le cluster survit à la perte d'un passif (HA réelle).
+
+## 9. Tests
+
 
 Logique de quorum entièrement testée (fonctions pures) :
 ```powershell

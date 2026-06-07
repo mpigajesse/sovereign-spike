@@ -256,9 +256,24 @@ async fn watch_loop(state: Arc<SupervisorState>) {
             continue; // pas encore le seuil — on patiente
         }
 
-        // 2. Primary jugé mort. Suis-je le candidat préféré (rang le plus faible) ?
-        let reachable = reachable_standbys(&client, cfg).await;
-        if !is_preferred_candidate(cfg.rank, &cfg.node_id, &reachable) {
+        // 2. Primary jugé mort. Sonder les pairs AVANT toute élection.
+        let survey = survey_peers(&client, cfg).await;
+
+        // 2a. Un pair s'est-il DÉJÀ fait promouvoir ? Alors un nouveau primary
+        //     existe : on abandonne (anti double-promotion / split-brain).
+        //     On considère le primary « vivant » (le nouveau) et on se tait.
+        if let Some(new_primary) = &survey.promoted_peer {
+            tracing::info!(
+                %new_primary,
+                "un pair est déjà promu primary → pas d'élection (réintégration manuelle requise)"
+            );
+            detector.record_success(); // stoppe l'escalade
+            state.primary_alive.store(true, Ordering::SeqCst);
+            continue;
+        }
+
+        // 2b. Suis-je le candidat préféré (rang le plus faible encore joignable) ?
+        if !is_preferred_candidate(cfg.rank, &cfg.node_id, &survey.standbys) {
             tracing::info!(
                 rang = cfg.rank,
                 "primary mort mais un standby plus prioritaire est joignable → j'attends"
@@ -292,21 +307,34 @@ async fn ping(client: &reqwest::Client, url: &str) -> bool {
     )
 }
 
-/// Interroge les pairs pour savoir lesquels sont des standbys joignables.
-/// Renvoie (rang, node_id) de chaque pair standby vivant.
-async fn reachable_standbys(client: &reqwest::Client, cfg: &Config) -> Vec<(u32, String)> {
-    let mut out = Vec::new();
+/// Résultat du sondage des pairs avant une élection.
+struct PeerSurvey {
+    /// (rang, node_id) des pairs encore standby et NON promus → candidats potentiels.
+    standbys:      Vec<(u32, String)>,
+    /// Un pair s'est déjà fait promouvoir primary → une élection est inutile/dangereuse.
+    promoted_peer: Option<String>,
+}
+
+/// Interroge les pairs : qui est un standby disponible, et l'un d'eux est-il déjà
+/// devenu primary (promu) ? Détecter un primary fraîchement élu évite qu'un second
+/// standby se promeuve à son tour (anti double-promotion / split-brain applicatif).
+async fn survey_peers(client: &reqwest::Client, cfg: &Config) -> PeerSurvey {
+    let mut standbys = Vec::new();
+    let mut promoted_peer = None;
     for peer in &cfg.peers {
         let url = format!("http://{}/supervisor/status", peer.addr);
         if let Ok(resp) = client.get(&url).timeout(Duration::from_secs(2)).send().await {
             if let Ok(status) = resp.json::<StatusReply>().await {
+                if status.promoted {
+                    promoted_peer = Some(status.node_id.clone());
+                }
                 if status.role == "standby" && !status.promoted {
-                    out.push((status.rank, status.node_id));
+                    standbys.push((status.rank, status.node_id));
                 }
             }
         }
     }
-    out
+    PeerSurvey { standbys, promoted_peer }
 }
 
 /// Demande un vote à chaque pair et agrège jusqu'à atteindre (ou non) le quorum.
@@ -353,6 +381,13 @@ async fn promote_self(client: &reqwest::Client, cfg: &Config) -> anyhow::Result<
         Err(e) => tracing::error!("impossible d'exécuter pg_ctl : {e} — promotion d'époque tout de même tentée"),
     }
 
+    // 1b. Relâcher la réplication SYNCHRONE sur le nouveau primary.
+    //     Piège prouvé en live : si `synchronous_standby_names` reste non vide, le
+    //     promu BLOQUE sur chaque écriture en attendant un standby qui n'existe plus
+    //     (l'ancien primary est mort). La promotion manuelle (GUI) fait déjà ce
+    //     relâchement — l'automatique DOIT le faire aussi. Best-effort.
+    release_sync_replication(cfg).await;
+
     // 2. Incrémenter l'époque (fencing) via le nœud actif local — bloque l'ancien primary.
     let url = format!("{}/epoch/promote", cfg.local_node_url.trim_end_matches('/'));
     let resp = client.post(&url).timeout(Duration::from_secs(5)).send().await?;
@@ -365,12 +400,54 @@ async fn promote_self(client: &reqwest::Client, cfg: &Config) -> anyhow::Result<
     Ok(epoch.epoch)
 }
 
+/// Relâche la réplication synchrone sur le PostgreSQL local fraîchement promu.
+/// Best-effort : exécute `psql` (depuis PG_BIN) pour vider `synchronous_standby_names`.
+/// Sans cela, le nouveau primary bloque sur les écritures (piège prouvé en live).
+async fn release_sync_replication(cfg: &Config) {
+    let psql = format!(r"{}\psql.exe", cfg.pg_bin);
+    let pw = std::env::var("SOVEREIGN_PG_ADMIN_PW").unwrap_or_else(|_| "admin".to_string());
+    let sql = "ALTER SYSTEM SET synchronous_standby_names = ''; SELECT pg_reload_conf();";
+    let result = tokio::process::Command::new(&psql)
+        .env("PGPASSWORD", pw)
+        .args(["-h", "127.0.0.1", "-U", "postgres", "-d", "sovereign_active", "-c", sql])
+        .output()
+        .await;
+    match result {
+        Ok(o) if o.status.success() => {
+            tracing::info!("réplication synchrone relâchée sur le promu (synchronous_standby_names vidé)");
+        }
+        Ok(o) => tracing::warn!(
+            stderr = %String::from_utf8_lossy(&o.stderr),
+            "relâchement sync : psql a renvoyé une erreur (non bloquant)"
+        ),
+        Err(e) => tracing::warn!("relâchement sync : impossible d'exécuter psql : {e} (non bloquant)"),
+    }
+}
+
 // ── Handlers HTTP ───────────────────────────────────────────────────────────────
 
 async fn handle_vote(
     State(state): State<Arc<SupervisorState>>,
     Json(req): Json<VoteRequest>,
 ) -> (StatusCode, Json<VoteReply>) {
+    // Un nœud DÉJÀ PROMU est le nouveau primary : il ne vote JAMAIS pour en
+    // promouvoir un autre (sinon double-promotion → split-brain applicatif).
+    if state.promoted.load(Ordering::SeqCst) {
+        tracing::warn!(
+            candidate = %req.candidate_id,
+            "vote REFUSÉ : ce nœud est déjà primary (un primary ne promeut personne)"
+        );
+        let ledger = state.ledger.lock().await;
+        return (
+            StatusCode::OK,
+            Json(VoteReply {
+                granted: false,
+                term: ledger.current_term(),
+                voter_id: state.cfg.node_id.clone(),
+                primary_seen_alive: true, // de son point de vue, le primary (lui) est vivant
+            }),
+        );
+    }
     // Un votant n'accorde sa voix que s'il considère LUI AUSSI le primary mort.
     let primary_seen_alive = state.primary_alive.load(Ordering::SeqCst);
     let mut ledger = state.ledger.lock().await;
