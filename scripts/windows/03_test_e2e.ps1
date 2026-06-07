@@ -3,14 +3,14 @@
 # À exécuter depuis Windows une fois les 3 nœuds démarrés.
 #
 # Prérequis :
-#   - Nœud actif  : http://192.168.200.1:3000   (ce PC)
-#   - Nœud passif : http://192.168.200.130:3001  (Ubuntu)
-#   - Relais      : http://192.168.200.128:4000  (Kali)
+#   - Nœud actif  : http://192.168.200.1:3000    (PC physique, Windows 11)
+#   - Nœud passif : http://192.168.200.133:3001  (VM1, Windows 11)
+#   - Relais      : http://192.168.200.134:4000  (VM2, Windows 11)
 # =============================================================================
 
 $ACTIVE    = "http://192.168.200.1:3000"
-$PASSIVE   = "http://192.168.200.130:3001"
-$RELAY     = "http://192.168.200.128:4000"
+$PASSIVE   = "http://192.168.200.133:3001"
+$RELAY     = "http://192.168.200.134:4000"
 $RELAY_KEY = "sovereign-spike-relay-key-2026"
 
 $PASS = 0; $FAIL = 0
@@ -37,10 +37,10 @@ Write-Host "Relais : $RELAY"
 Test-Step "Santé nœud actif (Windows)" {
     if ((Invoke-RestMethod "$ACTIVE/health") -ne "ok") { throw "réponse inattendue" }
 }
-Test-Step "Santé nœud passif (Ubuntu)" {
+Test-Step "Santé nœud passif (VM1, Windows)" {
     if ((Invoke-RestMethod "$PASSIVE/health") -notmatch "passif") { throw "réponse inattendue" }
 }
-Test-Step "Santé relais aveugle (Kali)" {
+Test-Step "Santé relais aveugle (VM2, Windows)" {
     $r = Invoke-Api GET "$RELAY/health"
     Write-Host "    role=$($r.role)"
     if ($r.role -ne "relay-aveugle") { throw "role=$($r.role)" }

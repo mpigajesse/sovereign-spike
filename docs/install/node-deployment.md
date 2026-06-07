@@ -8,6 +8,10 @@ Architecture validée en Phase 0 (2026-06-04) : cluster actif/passif PostgreSQL 
 
 ## Architecture des 3 nœuds
 
+> **Topologie réelle du banc d'essai : 100 % Windows 11.** Les trois machines
+> (PC physique + 2 VM VMware sur le réseau host-only VMnet1) tournent sous
+> Windows 11 — il n'y a **aucune machine Linux** dans ce banc d'essai.
+
 ```
 ┌──────────────────────────────────┐
 │  NŒUD ACTIF — Windows 11        │  PC physique
@@ -18,24 +22,25 @@ Architecture validée en Phase 0 (2026-06-04) : cluster actif/passif PostgreSQL 
              │  (rôle replicator / PostgreSQL)
              ▼
 ┌──────────────────────────────────┐
-│  NŒUD PASSIF — Ubuntu 26.04     │  VM VMware VMnet1
-│  PostgreSQL 18 (standby)         │  192.168.200.130
+│  NŒUD PASSIF — Windows 11 (VM1) │  VM VMware VMnet1
+│  PostgreSQL 18 (standby)         │  192.168.200.133
 │  sovereign-node-passive :3001    │
 │  SQLite (réplique locale)        │
 └──────────────────────────────────┘
 
 ┌──────────────────────────────────┐
-│  RELAIS AVEUGLE — Kali Linux    │  VM VMware VMnet1
-│  sovereign-relay :4000           │  192.168.200.128
+│  RELAIS AVEUGLE — Windows 11    │  VM VMware VMnet1
+│  (VM2)                           │  192.168.200.134
+│  sovereign-relay :4000           │
 │  Zéro-knowledge : aucune DEK    │
 └──────────────────────────────────┘
 ```
 
 | Nœud | Machine | IP LAN (VMnet1) | Port |
 |------|---------|-----------------|------|
-| Actif | Windows 11 physique | `192.168.200.1` | `:3000` |
-| Passif | Ubuntu 26.04 VM | `192.168.200.130` | `:3001` |
-| Relais | Kali Linux VM | `192.168.200.128` | `:4000` |
+| Actif | Windows 11 — PC physique | `192.168.200.1` | `:3000` |
+| Passif | Windows 11 — VM1 | `192.168.200.133` | `:3001` |
+| Relais | Windows 11 — VM2 | `192.168.200.134` | `:4000` |
 
 ---
 
@@ -46,18 +51,18 @@ Architecture validée en Phase 0 (2026-06-04) : cluster actif/passif PostgreSQL 
 | RAM | 4 Go par machine |
 | Disque | 10 Go libres |
 | Réseau | LAN VMnet1 host-only (192.168.200.0/24) |
-| OS | Windows 11 (actif) · Ubuntu 26.04 (passif) · Kali Linux (relais) |
+| OS | Windows 11 sur les 3 machines (PC, VM1, VM2) |
 
 ---
 
 ## Ordre de déploiement
 
 ```
-1. Windows (actif)  → 01_setup_pg.ps1  → 02_start_active.ps1
-2. Ubuntu (passif)  → 01_install_deps.sh → 02_setup_standby.sh → 03_start_passive.sh
-3. Kali (relais)    → 01_install_deps.sh → 02_start_relay.sh
-4. Test E2E         → 03_test_e2e.ps1 (depuis Windows)
-5. Licence (optionnel) → sovereign-control + LICENSE_AUTHORITY_PUBKEY_HEX/LICENSE_TOKEN_PATH
+1. Windows (actif, PC)   → 01_setup_pg.ps1        → 02_start_active.ps1
+2. Windows (passif, VM1) → 03_setup_standby_win.ps1 → cargo run --bin sovereign-node-passive
+3. Windows (relais, VM2) → cargo run --bin sovereign-relay  (pas de script dédié — voir Étape 3)
+4. Test E2E              → 03_test_e2e.ps1 (depuis Windows, IP à jour : 192.168.200.133/.134)
+5. Licence (optionnel)   → sovereign-control + LICENSE_AUTHORITY_PUBKEY_HEX/LICENSE_TOKEN_PATH
 ```
 
 ---
@@ -80,7 +85,7 @@ cd D:\PFE-FINAL\pfe\sovereign-spike
 Ce script :
 - Crée la base `sovereign_active` et les rôles (`sovereign`, `replicator`)
 - Configure `postgresql.conf` (wal_level=replica, synchronous_commit=on)
-- Configure `pg_hba.conf` pour autoriser le standby Ubuntu
+- Configure `pg_hba.conf` pour autoriser le standby (VM1, `192.168.200.133`)
 - Crée le slot de réplication `sovereign_slot`
 
 ### 1.3 Démarrer le nœud actif
@@ -103,64 +108,100 @@ Invoke-RestMethod http://192.168.200.1:3000/health
 
 ---
 
-## Étape 2 — Nœud passif (Ubuntu 26.04)
+## Étape 2 — Nœud passif (Windows 11 — VM1, `192.168.200.133`)
 
-Voir `docs/install/node-ubuntu-config.md` pour le détail.
+### 2.1 Prérequis
 
-```bash
-# Cloner le dépôt
-sudo git clone https://github.com/mpigajesse/sovereign-spike.git /opt/sovereign-spike
-cd /opt/sovereign-spike
+- PostgreSQL 18 installé (`C:\Program Files\PostgreSQL\18\`)
+- Rust toolchain (`rustup` + `cargo`)
+- Git, dépôt cloné dans `D:\PFE-FINAL\pfe\sovereign-spike`
 
-# Installer PostgreSQL 18 + dépendances Rust
-bash scripts/ubuntu/01_install_deps.sh
+### 2.2 Configurer le standby PostgreSQL
 
-# Configurer le standby (pg_basebackup depuis le primary Windows)
-sudo bash scripts/ubuntu/02_setup_standby.sh
+```powershell
+cd D:\PFE-FINAL\pfe\sovereign-spike
+.\scripts\windows\03_setup_standby_win.ps1
+```
 
-# Démarrer le nœud passif SQLite
-sudo bash scripts/ubuntu/03_start_passive.sh
+Ce script (auto-élévation UAC) :
+- Détecte l'IP locale VMnet1 (`192.168.200.133`) et dérive un slot/`application_name`
+  **uniques** depuis le dernier octet (`sovereign_slot_133`, `sovereign_standby_133`) —
+  indispensable pour cohabiter avec un futur 2ᵉ passif sans collision
+- Crée le slot de réplication sur le primary (`192.168.200.1:5432`)
+- Exécute `pg_basebackup` puis configure `postgresql.auto.conf` + `standby.signal`
+- Démarre PostgreSQL en mode standby (streaming replication)
+
+### 2.3 Démarrer le nœud passif
+
+Pas de script PowerShell dédié pour ce binaire — compilation puis lancement manuel,
+même schéma que `02_start_active.ps1` :
+
+```powershell
+cd D:\PFE-FINAL\pfe\sovereign-spike
+cargo build --release --bin sovereign-node-passive
+
+$env:DATABASE_URL = "postgres://sovereign:sovereign@127.0.0.1:5432/sovereign_active"
+$env:LISTEN_ADDR  = "0.0.0.0:3001"
+# SOVEREIGN_DEK_HEX : IDENTIQUE à celle du nœud actif (cf. shared.env)
+
+.\target\release\sovereign-node-passive.exe
 ```
 
 Vérification :
-```bash
-curl http://192.168.200.130:3001/health
+```powershell
+Invoke-RestMethod http://192.168.200.133:3001/health
 # → ok (passif)
 ```
 
 ---
 
-## Étape 3 — Relais aveugle (Kali Linux)
+## Étape 3 — Relais aveugle (Windows 11 — VM2, `192.168.200.134`)
 
-Voir `docs/install/node-kali-config.md` pour le détail.
+> Le relais est un **binaire séparé, zéro-knowledge** : il ne charge **aucune** clé
+> crypto (ni DEK, ni clé d'autorité de licence) et ne stocke que des blobs opaques.
+> Il n'existe pas de script PowerShell dédié pour le démarrer (seul un script bash
+> existait pour la VM Linux désormais retirée du banc d'essai) — lancement manuel,
+> même schéma que `sovereign-control` à l'Étape 5.1.
 
-```bash
-# Cloner le dépôt
-sudo git clone https://github.com/mpigajesse/sovereign-spike.git /opt/sovereign-spike
-cd /opt/sovereign-spike
+### 3.1 Prérequis
 
-# Installer Rust + libsodium + compiler le relais
-bash scripts/kali/01_install_deps.sh
+- Rust toolchain (`rustup` + `cargo`), libsodium
+- Git, dépôt cloné dans `D:\PFE-FINAL\pfe\sovereign-spike`
 
-# Démarrer le relais
-bash scripts/kali/02_start_relay.sh
+> Un binaire précompilé existe aussi en sidecar Tauri
+> (`crates/tauri-app/src-tauri/binaries/sovereign-relay-x86_64-pc-windows-msvc.exe`)
+> et peut être copié/exécuté directement si l'on préfère éviter la compilation locale.
+
+### 3.2 Compiler et démarrer le relais
+
+```powershell
+cd D:\PFE-FINAL\pfe\sovereign-spike
+cargo build --release --bin sovereign-relay
+
+$env:RELAY_LISTEN_ADDR = "0.0.0.0:4000"
+$env:RELAY_API_KEY     = "sovereign-spike-relay-key-2026"
+$env:RELAY_MAX_BLOBS   = "100000"
+# Pas de SOVEREIGN_DEK_HEX, pas de LICENSE_* : le relais ne les charge jamais (zero-knowledge)
+
+.\target\release\sovereign-relay.exe
 ```
 
 Vérification :
-```bash
-curl http://192.168.200.128:4000/health
-# → {"role":"relay-aveugle","status":"ok"}
+```powershell
+Invoke-RestMethod http://192.168.200.134:4000/health
+# → { "role": "relay-aveugle" / "amane-relay", "status": "ok" }
 ```
 
 ---
 
 ## Étape 4 — Test E2E complet
 
-Depuis Windows, une fois les 3 nœuds démarrés :
+Depuis Windows (PC actif), une fois les 3 nœuds démarrés :
 
 ```powershell
 .\scripts\windows\03_test_e2e.ps1
 ```
+
 
 Résultat attendu : **13/13 tests réussis**.
 
@@ -255,7 +296,7 @@ Fichier `scripts/shared.env` (à créer sur chaque nœud, même contenu) :
 SOVEREIGN_DEK_HEX=174835f0e063680d4b4652c7edf9472a1db0626388dbbe4342d84a7c9bce035b
 RELAY_API_KEY=sovereign-spike-relay-key-2026
 ACTIVE_NODE_URL=http://192.168.200.1:3000
-RELAY_URL=http://192.168.200.128:4000
+RELAY_URL=http://192.168.200.134:4000
 ```
 
 > **Important :** `SOVEREIGN_DEK_HEX` doit être identique sur le nœud actif et le nœud passif. Le relais ne charge **jamais** cette variable (zéro-knowledge).
@@ -274,20 +315,27 @@ LICENSE_TOKEN_PATH=D:\PFE-FINAL\pfe\sovereign-spike\license.json
 
 ## Ports à ouvrir (pare-feu)
 
-### Windows (PowerShell admin)
+Les 3 machines sont sous Windows 11 — une seule syntaxe (`New-NetFirewallRule`,
+PowerShell admin), à adapter selon le rôle de chaque machine.
+
+### PC physique — nœud actif (`192.168.200.1`)
 
 ```powershell
 New-NetFirewallRule -DisplayName "Sovereign-Active"    -Direction Inbound -Protocol TCP -LocalPort 3000 -Action Allow
 New-NetFirewallRule -DisplayName "Sovereign-PG-Replic" -Direction Inbound -Protocol TCP -LocalPort 5432 -Action Allow
 ```
 
-### Ubuntu / Kali (ufw)
+### VM1 — nœud passif (`192.168.200.133`)
 
-```bash
-sudo ufw allow 3001/tcp   # nœud passif
-sudo ufw allow 4000/tcp   # relais
-sudo ufw allow 5432/tcp   # PostgreSQL standby (Ubuntu uniquement)
-sudo ufw reload
+```powershell
+New-NetFirewallRule -DisplayName "Sovereign-Passive"   -Direction Inbound -Protocol TCP -LocalPort 3001 -Action Allow
+New-NetFirewallRule -DisplayName "Sovereign-PG-Standby" -Direction Inbound -Protocol TCP -LocalPort 5432 -Action Allow
+```
+
+### VM2 — relais aveugle (`192.168.200.134`)
+
+```powershell
+New-NetFirewallRule -DisplayName "Sovereign-Relay" -Direction Inbound -Protocol TCP -LocalPort 4000 -Action Allow
 ```
 
 ---
@@ -301,16 +349,17 @@ Nœud actif (Windows)
 [ ] Slot de réplication sovereign_slot créé
 [ ] sovereign-node-active.exe UP — GET /health → "ok"
 
-Nœud passif (Ubuntu)
-[ ] pg_basebackup terminé — /var/lib/postgresql/18/main peuplé
-[ ] standby.signal présent
+Nœud passif (Windows — VM1, 192.168.200.133)
+[ ] pg_basebackup terminé — C:\Program Files\PostgreSQL\18\data peuplé
+[ ] standby.signal présent (créé par 03_setup_standby_win.ps1, sans BOM)
 [ ] PostgreSQL standby UP — pg_isready localhost OK
-[ ] sovereign-node-passive UP — GET /health → "ok (passif)"
-[ ] pg_stat_replication sur Windows → state=streaming
+[ ] sovereign-node-passive.exe UP — GET /health → "ok (passif)"
+[ ] pg_stat_replication sur le PC actif → sovereign_standby_133, state=streaming
 
-Relais (Kali)
-[ ] sovereign-relay compilé — target/release/sovereign-relay
-[ ] sovereign-relay UP — GET /health → role=relay-aveugle
+Relais (Windows — VM2, 192.168.200.134)
+[ ] sovereign-relay compilé — target\release\sovereign-relay.exe
+[ ] sovereign-relay UP — GET /health → role=relay-aveugle / amane-relay
+[ ] Aucune SOVEREIGN_DEK_HEX ni LICENSE_* chargée (zero-knowledge confirmé)
 
 Test E2E
 [ ] 13/13 tests réussis
