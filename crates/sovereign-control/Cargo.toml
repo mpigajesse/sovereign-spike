@@ -1,0 +1,25 @@
+[package]
+name    = "sovereign-control"
+version.workspace = true
+edition = "2021"
+
+# sovereign-control est un service éditeur SÉPARÉ du relais (sovereign-relay).
+# Contrairement au relais — aveugle par construction et qui NE dépend PAS de
+# sovereign-core — ce service détient une autorité (clé privée Ed25519 de licence)
+# et dépend donc du cœur pour signer. Il ne stocke, ne transmet et ne déchiffre
+# en revanche AUCUN blob ni DEK : deux propriétés séparément prouvables.
+
+[dependencies]
+sovereign-core               = { path = "../core" }
+tokio.workspace              = true
+axum.workspace               = true
+tower-http.workspace         = true
+serde.workspace              = true
+serde_json.workspace         = true
+chrono.workspace             = true
+anyhow.workspace             = true
+tracing.workspace            = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }

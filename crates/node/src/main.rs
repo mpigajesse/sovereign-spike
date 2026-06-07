@@ -4,11 +4,14 @@
 //!   DATABASE_URL        — connexion PostgreSQL (défaut : postgres://sovereign:sovereign@localhost/sovereign_active)
 //!   SOVEREIGN_DEK_HEX   — DEK hex-encodée 32 octets (si absente : DEK éphémère générée + loguée)
 //!   LISTEN_ADDR         — adresse d'écoute HTTP (défaut : 0.0.0.0:3000)
+//!   LICENSE_AUTHORITY_PUBKEY_HEX / LICENSE_TOKEN_PATH — licence soft (cf. license.rs) ;
+//!                        absentes ⇒ mode autonome, AUCUN impact sur les routes métier
 
 mod active;
 mod business;
 mod devices;
 mod failover;
+mod license;
 mod tenant;
 
 use std::sync::Arc;
@@ -80,13 +83,44 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(relay = %url, "push automatique vers le relais activé");
     }
 
+    // ── Licence (soft — informatif uniquement, ne bloque jamais l'accès aux données) ──
+    let license_authority_pubkey = license::trusted_authority_pubkey_from_env();
+    let license_token_path = license::token_path_from_env();
+    let license_status = license::current_status(license_authority_pubkey.as_deref(), &license_token_path);
+    match &license_status {
+        license::LicenseStatus::Valid { claims } => tracing::info!(
+            tenant_id = %claims.tenant_id, plan = %claims.plan, expires_at = %claims.expires_at,
+            "licence valide"
+        ),
+        license::LicenseStatus::Expired { claims } => tracing::warn!(
+            tenant_id = %claims.tenant_id, expired_at = %claims.expires_at,
+            "licence expirée — MAJ/support suspendus, les données restent pleinement accessibles"
+        ),
+        license::LicenseStatus::Invalid => tracing::warn!(
+            "jeton de licence invalide (signature ou autorité inattendue) — \
+             MAJ/support suspendus, les données restent pleinement accessibles"
+        ),
+        license::LicenseStatus::NotConfigured => tracing::info!(
+            "aucune licence configurée — mode autonome, les données restent pleinement accessibles"
+        ),
+    }
+
     let state = Arc::new(active::AppState {
         pool,
         dek: std::sync::RwLock::new(dek),
         epoch_guard,
         relay_url,
         relay_key,
+        license_authority_pubkey,
+        license_token_path,
+        license_status: std::sync::RwLock::new(license_status),
     });
+
+    // Ré-évaluation périodique : capte à la fois l'expiration au fil du temps et le
+    // renouvellement (remplacement du fichier jeton), sans jamais toucher aux routes
+    // métier — la licence reste un simple indicateur lu par le tableau de bord.
+    tokio::spawn(spawn_license_refresh(state.clone()));
+
     let app   = active::router(state);
 
     let listen_addr = std::env::var("LISTEN_ADDR")
@@ -98,4 +132,22 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// Ré-évalue périodiquement l'état de licence (expiration au fil du temps,
+/// renouvellement via remplacement du fichier jeton). Tâche d'arrière-plan
+/// purement informative : sa panne ou son arrêt n'affecte aucune route métier.
+async fn spawn_license_refresh(state: Arc<active::AppState>) {
+    const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+    let mut interval = tokio::time::interval(REFRESH_INTERVAL);
+    interval.tick().await; // ignore le premier déclenchement immédiat (déjà loggé au démarrage)
+
+    loop {
+        interval.tick().await;
+
+        let nouveau_statut = license::current_status(state.license_authority_pubkey.as_deref(), &state.license_token_path);
+        let mut verrou = state.license_status.write().expect("license_status RwLock empoisonné");
+        *verrou = nouveau_statut;
+    }
 }

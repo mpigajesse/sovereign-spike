@@ -3,6 +3,7 @@ members = [
     "crates/core",
     "crates/node",
     "crates/relay",
+    "crates/sovereign-control",
     "crates/tauri-app/src-tauri",
 ]
 resolver = "2"

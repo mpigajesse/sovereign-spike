@@ -32,7 +32,6 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use serde_json;
 use sovereign_core::{
     encrypt,
     journal::{encode_cbor, Operation, OpType, Payload},
@@ -55,6 +54,14 @@ pub struct AppState {
     pub relay_url:   Option<String>,
     /// Clé API pour le push vers le relais.
     pub relay_key:   Option<String>,
+    /// Clé publique de l'autorité de licence CONFIGURÉE localement (cf. license.rs —
+    /// jamais celle embarquée dans le jeton). `None` ⇒ vérification désactivée.
+    pub license_authority_pubkey: Option<String>,
+    /// Chemin du fichier JSON contenant le jeton de licence signé.
+    pub license_token_path:       std::path::PathBuf,
+    /// État de licence courant, ré-évalué périodiquement. PUREMENT INFORMATIF :
+    /// ne conditionne jamais l'exécution d'une route métier — licence « soft ».
+    pub license_status:           std::sync::RwLock<crate::license::LicenseStatus>,
 }
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────
@@ -109,6 +116,16 @@ pub struct JournalQuery {
     pub limit:     Option<i64>,
 }
 
+/// Réponse de GET /license — purement informative pour le tableau de bord.
+/// Une licence dégradée (expirée/invalide/absente) n'apparaît JAMAIS ailleurs
+/// dans l'API : aucune route métier ne consulte cet état.
+#[derive(Debug, Serialize)]
+pub struct LicenseResponse {
+    #[serde(flatten)]
+    pub status: crate::license::LicenseStatus,
+    pub banner: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
@@ -121,6 +138,7 @@ type ApiResult<T> = Result<(StatusCode, Json<T>), (StatusCode, Json<ErrorRespons
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/health",         get(health))
+        .route("/license",        get(handle_get_license))
         .route("/write",          post(handle_write))
         .route("/stock/:item_id", get(handle_get_stock))
         .route("/journal",        get(handle_get_journal))
@@ -151,6 +169,13 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// GET /license — état de licence pour le tableau de bord. Lecture seule, locale,
+/// sans aucun appel réseau ni effet sur les routes métier (licence « soft »).
+async fn handle_get_license(State(state): State<Arc<AppState>>) -> Json<LicenseResponse> {
+    let status = state.license_status.read().expect("license_status RwLock empoisonné").clone();
+    Json(LicenseResponse { banner: status.banner(), status })
 }
 
 /// GET /stock/:item_id — consulte le stock courant d'un article.
@@ -324,7 +349,7 @@ async fn handle_write(
     if let (Some(relay_url), Some(relay_key)) = (&state.relay_url, &state.relay_key) {
         let relay_url = relay_url.clone();
         let relay_key = relay_key.clone();
-        let nonce_hex   = hex::encode(&blob.nonce);
+        let nonce_hex   = hex::encode(blob.nonce);
         let ct_hex      = hex::encode(&blob.ciphertext);
         // tenant_id pour cloisonner le blob au relais « Amane » (vide si compte pas encore créé).
         let tenant_id = current_tenant_id_or_empty(&state.pool).await;
