@@ -23,11 +23,24 @@ interface Stats {
   blobs:  number | null;
 }
 
+interface SupervisorStatus {
+  node_id:       string;
+  role:          string;
+  rank:          number;
+  cluster_size:  number;
+  promoted:      boolean;
+  primary_alive: boolean;
+  current_term:  number;
+  peers:         string[];
+}
+
 export default function Dashboard() {
   const [active,  setActive]  = useState<NodeState>({ status: "loading" });
   const [passive, setPassive] = useState<NodeState>({ status: "loading" });
   const [relay,   setRelay]   = useState<NodeState>({ status: "loading" });
   const [stats,   setStats]   = useState<Stats>({ seq: null, epoch: null, lastSeq: null, blobs: null });
+  const [supervisor, setSupervisor] = useState<SupervisorStatus | null>(null);
+  const [supervisorState, setSupervisorState] = useState<NodeState>({ status: "loading" });
 
   // URLs configurées (page Configuration), normalisées au port canonique :
   // actif → 3000, relais → 4000 (impossible de se tromper de port).
@@ -81,6 +94,17 @@ export default function Dashboard() {
         setPassiveLabel("réplication PostgreSQL");
       });
 
+    // Superviseur de quorum (failover auto) — local sur :3100, optionnel.
+    invoke<SupervisorStatus>("supervisor_status")
+      .then(s => {
+        setSupervisor(s);
+        setSupervisorState({ status: "ok" });
+      })
+      .catch(() => {
+        setSupervisor(null);
+        setSupervisorState({ status: "unset" });
+      });
+
     // Relais — sauté si non configuré
     if (!relayCfg) {
       setRelay({ status: "unset" });
@@ -132,6 +156,16 @@ export default function Dashboard() {
         <NodeCard title="Nœud Actif"  url={shortUrl(urls.active)}  state={active}  sub={stats.epoch !== null ? `Époque ${stats.epoch}` : undefined} />
         <NodeCard title="Nœud Passif" url={passiveLabel}          state={passive} sub="réplication WAL synchrone" />
         <NodeCard title="Relais « Amane »" url={shortUrl(urls.relay)} state={relay} sub={relay.detail ?? (stats.blobs !== null ? `${stats.blobs} blobs stockés` : undefined)} />
+        <NodeCard
+          title="Failover auto (quorum)"
+          url={supervisor ? `${supervisor.node_id} · ${supervisor.role}` : "superviseur non démarré"}
+          state={supervisorState}
+          sub={supervisor
+            ? (supervisor.promoted
+                ? `⚡ PROMU primary (terme ${supervisor.current_term})`
+                : `quorum ${Math.floor(supervisor.cluster_size / 2) + 1}/${supervisor.cluster_size} · primary ${supervisor.primary_alive ? "vivant" : "DOWN"}`)
+            : "quorum natif Rust (sans Patroni)"}
+        />
       </div>
 
       {/* Métriques */}

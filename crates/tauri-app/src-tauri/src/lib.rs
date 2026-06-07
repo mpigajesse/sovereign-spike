@@ -43,6 +43,10 @@ fn no_window(cmd: &mut Command) -> &mut Command {
 
 struct NodeProcess(Mutex<Option<Child>>);
 
+/// Processus du superviseur de quorum (failover automatique, LOT 5).
+/// Slot séparé du nœud actif : superviseur et nœud tournent en parallèle.
+struct SupervisorProcess(Mutex<Option<Child>>);
+
 /// Coffre des paires de clés des « appareils virtuels » créés depuis l'UI pour la
 /// démo d'enrôlement. La clé privée X25519 ne quitte JAMAIS le backend Rust : l'UI
 /// ne reçoit que la clé publique (le « QR ») et un handle = cette clé publique hex.
@@ -710,6 +714,115 @@ async fn promote_node() -> Result<String, String> {
     ))
 }
 
+// ── Superviseur de quorum (failover automatique, LOT 5) ─────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SupervisorStatus {
+    pub node_id:       String,
+    pub role:          String,
+    pub rank:          u32,
+    pub cluster_size:  usize,
+    pub promoted:      bool,
+    pub primary_alive: bool,
+    pub current_term:  u64,
+    pub peers:         Vec<String>,
+}
+
+fn find_supervisor_binary(app: &tauri::AppHandle) -> Option<String> {
+    if let Ok(res) = app.path().resource_dir() {
+        let p = res.join("sovereign-supervisor.exe");
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let p = exe.parent().unwrap_or(std::path::Path::new("."))
+            .join("sovereign-supervisor.exe");
+        if p.exists() { return Some(p.to_string_lossy().to_string()); }
+    }
+    if no_window(Command::new("sovereign-supervisor").arg("--help")).output().is_ok() {
+        return Some("sovereign-supervisor".into());
+    }
+    None
+}
+
+/// Démarre le superviseur de quorum (sidecar embarqué).
+/// `role` = "primary" | "standby". `rank` = priorité de succession (0 = 1er).
+/// `peers` = CSV "node_id@host:port". `primary_ip` = IP du primary actuel.
+#[tauri::command]
+async fn start_supervisor(
+    node_id:    String,
+    role:       String,
+    rank:       u32,
+    peers:      String,
+    primary_ip: String,
+    state:      State<'_, SupervisorProcess>,
+    app:        tauri::AppHandle,
+) -> Result<String, String> {
+    {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        if let Some(child) = guard.as_mut() {
+            match child.try_wait() {
+                Ok(None) => return Ok("Superviseur déjà en cours".into()),
+                _ => { *guard = None; } // mort → on relance
+            }
+        }
+    }
+
+    let role = match role.to_lowercase().as_str() {
+        "primary" | "standby" => role.to_lowercase(),
+        other => return Err(format!("rôle invalide : '{other}' (attendu primary|standby)")),
+    };
+    let host = primary_ip.trim()
+        .trim_start_matches("https://").trim_start_matches("http://")
+        .split(['/', ':']).next().unwrap_or("").to_string();
+    if host.is_empty() {
+        return Err("IP du primary requise".into());
+    }
+
+    let bin = find_supervisor_binary(&app)
+        .ok_or_else(|| "Binaire sovereign-supervisor introuvable dans le bundle".to_string())?;
+
+    let mut cmd = Command::new(&bin);
+    cmd.env("SUP_NODE_ID",        &node_id)
+        .env("SUP_ROLE",           &role)
+        .env("SUP_RANK",           rank.to_string())
+        .env("SUP_PEERS",          &peers)
+        .env("SUP_PRIMARY_HEALTH", format!("http://{host}:3000/health"))
+        .env("SUP_LOCAL_NODE_URL", "http://127.0.0.1:3000")
+        .env("SUP_LISTEN_ADDR",    "0.0.0.0:3100");
+    let child = no_window(&mut cmd)
+        .spawn()
+        .map_err(|e| format!("Impossible de démarrer le superviseur : {e}"))?;
+
+    {
+        let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+        *guard = Some(child);
+    }
+    Ok(format!("✓ Superviseur '{node_id}' démarré (rôle {role}, rang {rank})"))
+}
+
+/// Arrête le superviseur de quorum local.
+#[tauri::command]
+async fn stop_supervisor(state: State<'_, SupervisorProcess>) -> Result<String, String> {
+    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
+    if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        Ok("Superviseur arrêté".into())
+    } else {
+        Ok("Superviseur déjà arrêté".into())
+    }
+}
+
+/// Interroge le statut du superviseur local (HTTP sur :3100).
+#[tauri::command]
+async fn supervisor_status() -> Result<SupervisorStatus, String> {
+    let r = reqwest::Client::new()
+        .get("http://127.0.0.1:3100/supervisor/status")
+        .timeout(Duration::from_secs(3))
+        .send().await
+        .map_err(|e| format!("superviseur injoignable : {e}"))?;
+    r.json::<SupervisorStatus>().await.map_err(|e| e.to_string())
+}
+
 // ── Point d'entrée ────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -720,6 +833,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(NodeProcess(Mutex::new(None)))
+        .manage(SupervisorProcess(Mutex::new(None)))
         .manage(DeviceVault(Mutex::new(HashMap::new())))
         .setup(|_app| {
             // Pas d'auto-start ici : le démarrage du nœud (actif / solo / relais)
@@ -747,6 +861,9 @@ pub fn run() {
             cluster_status,
             set_replication_mode,
             promote_node,
+            start_supervisor,
+            stop_supervisor,
+            supervisor_status,
             dev_generate_keypair,
             dev_unwrap_dek,
             try_decrypt_blob,

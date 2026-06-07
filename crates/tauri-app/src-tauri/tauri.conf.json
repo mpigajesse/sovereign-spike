@@ -1,6 +1,6 @@
 {
   "productName": "Sovereign Data Agent",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "identifier": "ma.albaraa.sovereign-data-agent",
   "build": {
     "frontendDist": "../dist",
@@ -30,7 +30,8 @@
     "externalBin": [
       "binaries/sovereign-node-active",
       "binaries/sovereign-node-solo",
-      "binaries/sovereign-relay"
+      "binaries/sovereign-relay",
+      "binaries/sovereign-supervisor"
     ],
     "icon": [
       "icons/32x32.png",
@@ -43,7 +44,9 @@
       "binaries/sovereign-node-active-x86_64-pc-windows-msvc.exe": "sovereign-node-active.exe",
       "binaries/sovereign-node-solo-x86_64-pc-windows-msvc.exe": "sovereign-node-solo.exe",
       "binaries/sovereign-relay-x86_64-pc-windows-msvc.exe": "sovereign-relay.exe",
-      "../../../scripts/windows/03_setup_standby_win.ps1": "scripts/windows/03_setup_standby_win.ps1"
+      "binaries/sovereign-supervisor-x86_64-pc-windows-msvc.exe": "sovereign-supervisor.exe",
+      "../../../scripts/windows/03_setup_standby_win.ps1": "scripts/windows/03_setup_standby_win.ps1",
+      "../../../scripts/windows/04_start_supervisor.ps1": "scripts/windows/04_start_supervisor.ps1"
     }
   }
 }

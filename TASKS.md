@@ -213,7 +213,7 @@
 | LOT 2 | Schéma `business` + CRUD Produits & Clients (journalisé, chiffré, générique) | ✅ 0.1.11 |
 | LOT 3 | Ventes / anti-survente (invariant fort) | ✅ déjà prouvé (inchangé) |
 | LOT 4 | Relais « Amane » multi-tenant (blobs séparés par tenant_id) | ✅ 0.1.12 |
-| LOT 5 | Topologie actif + 2 passifs + failover automatique quorum | ⬜ reporté |
+| LOT 5 | Topologie actif + 2 passifs + failover automatique quorum | ✅ 0.1.13 (superviseur Rust, code+tests) |
 | LOT 6 | Plan de contrôle éditeur (licences, MAJ) | ⬜ futur hors-spike |
 
 Décisions actées : D1 séparation non-disruptive (`business` schéma, moteur reste `public`),
@@ -235,8 +235,8 @@ rétrocompatible (blobs stock inchangés au bit près). Tests : 57/57.
 | 2. Coupé du serveur → lecture OK, écriture refusée | ✅ par construction | passif sans `/write` |
 | 3. Confirmation après réplication (synchrone) | ✅ live | `synchronous_standby_names` |
 | 4a. Failover **manuel** sans perte | ✅ live | promotion standby zéro perte |
-| 4b. Failover **automatique** par quorum (≥3) | ❌ manquant | Patroni/Raft non déployé |
-| 5. Pas de split-brain sous coupure | 🟡 partiel | fencing (après coup) ✅ ; prévention quorum ❌ |
+| 4b. Failover **automatique** par quorum (≥3) | ✅ code+tests (0.1.13) | superviseur Rust : majorité stricte → `pg_ctl promote` + époque (17 tests) |
+| 5. Pas de split-brain sous coupure | ✅ code+tests | prévention par quorum (minorité refuse) + fencing après coup |
 | 6. Retour ancien actif → fencé | ✅ live | 503 si époque périmée |
 | 7. Relais → que du chiffré | ✅ live | blobs opaques, zéro dép. crypto |
 | 8. Enrôlement sans exposer la clé | ✅ live (0.1.10) | page Parc : sealed box + unwrap |
@@ -261,7 +261,7 @@ Démo : `docs/demo/gestion-parc-demo.md`.
 | Phase 3 — Frontend Tauri | 90% | ✅ App + gestion du parc (0.1.10), build OK |
 | Phase 3 — Mobile UniFFI | 0% | ⬜ Architecture définie, hors-scope PFE immédiat |
 | Gestion du parc (#8–#11) | 100% | ✅ Livré 0.1.10 — 2026-06-06 |
-| Failover automatique quorum (#4b) | 0% | ⬜ Patroni/etcd — seul vrai manque §7.4 |
+| Failover automatique quorum (#4b) | 100% (code+tests) | ✅ superviseur Rust 0.1.13 — déploiement 3 machines à valider en live |
 
 ---
 

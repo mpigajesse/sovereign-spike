@@ -15,6 +15,10 @@ path = "src/bin/passive_node.rs"
 name = "sovereign-node-solo"
 path = "src/bin/solo_node.rs"
 
+[[bin]]
+name = "sovereign-supervisor"
+path = "src/bin/supervisor.rs"
+
 [dependencies]
 sovereign-core = { path = "../core" }
 tokio.workspace              = true
