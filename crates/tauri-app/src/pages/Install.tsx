@@ -24,18 +24,50 @@ export default function Install({ onComplete }: Props) {
   const [entreprise, setEntreprise] = useState("");
   const [gerant,     setGerant]     = useState("");
   const [emailPme,   setEmailPme]   = useState("");
+  // Failover automatique (superviseur de quorum, LOT 5) — primary & standby.
+  const [enableFailover, setEnableFailover] = useState(true);
+  const [peerA,      setPeerA]      = useState(""); // IP d'une autre machine du cluster
+  const [peerB,      setPeerB]      = useState(""); // IP de la 2e autre machine
+  const [rank,       setRank]       = useState(0);  // standby : 0 = 1er successeur, 1 = 2e
   const [log,        setLog]        = useState<string[]>([]);
   const [error,      setError]      = useState<string | null>(null);
 
   const addLog = (msg: string) => setLog(l => [...l, msg]);
+
+  // Dernier octet d'une IP → identifiant court de nœud (cohérent avec les slots PG).
+  const octet = (ip: string) =>
+    ip.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "").split(".").pop() || "x";
 
   // Extrait l'hôte nu : "http://192.168.200.1:5432/x" -> "192.168.200.1"
   // (le champ "IP PostgreSQL" attend une IP, pas une URL).
   const bareHost = (s: string) =>
     s.trim().replace(/^[a-z]+:\/\//i, "").replace(/[:/].*$/, "");
 
-  const startInstall = async () => {
-    // Le nœud actif crée le compte de la PME : le nom de l'entreprise est requis.
+  // Démarre le superviseur de quorum (failover auto) pour ce nœud.
+  // node_id dérivé de l'IP de CETTE machine ; pairs dérivés des IP saisies.
+  // primaryIpForWatch = le nœud primary à surveiller par heartbeat.
+  const launchSupervisor = async (supRole: "primary" | "standby", primaryIpForWatch: string) => {
+    const a = bareHost(peerA), b = bareHost(peerB);
+    if (!a || !b) {
+      addLog("⚠ Failover non activé : renseignez les IP des 2 autres machines.");
+      return;
+    }
+    const peers = `node${octet(a)}@${a}:3100,node${octet(b)}@${b}:3100`;
+    const nodeId = `node${octet(selfIpOrLoop())}`;
+    addLog(`Démarrage du superviseur de quorum (${supRole})...`);
+    const msg = await invoke<string>("start_supervisor", {
+      nodeId,
+      role: supRole,
+      rank: supRole === "standby" ? rank : 0,
+      peers,
+      primaryIp: primaryIpForWatch,
+    });
+    addLog(msg);
+  };
+
+  const selfIpOrLoop = () => bareHost(selfIp) || "127.0.0.1";
+
+  const startInstall = async () => {    // Le nœud actif crée le compte de la PME : le nom de l'entreprise est requis.
     if (role === "primary" && !entreprise.trim()) {
       setError("Saisissez le nom de votre entreprise pour créer votre compte.");
       return;
@@ -116,6 +148,12 @@ export default function Install({ onComplete }: Props) {
           addLog(msg);
         } catch { /* standby pas encore rattaché : sans effet immédiat */ }
 
+        // Failover automatique (superviseur de quorum) — surveille ce primary.
+        if (enableFailover) {
+          try { await launchSupervisor("primary", selfIpOrLoop()); }
+          catch (e) { addLog(`⚠ Superviseur non démarré : ${e instanceof Error ? e.message : String(e)}`); }
+        }
+
       } else if (role === "standby") {
         addLog("Vérification de PostgreSQL local...");
         const pgOk = await invoke<boolean>("check_pg_local");
@@ -130,6 +168,12 @@ export default function Install({ onComplete }: Props) {
         addLog(result);
         localStorage.setItem("sovereign_role", "standby");
         localStorage.setItem("sovereign_active_url", primaryUrl.trim());
+
+        // Failover automatique (superviseur de quorum) — surveille le primary.
+        if (enableFailover) {
+          try { await launchSupervisor("standby", bareHost(primaryPg)); }
+          catch (e) { addLog(`⚠ Superviseur non démarré : ${e instanceof Error ? e.message : String(e)}`); }
+        }
 
       } else {
         // Relais aveugle — lance le binaire relais (zero-knowledge, port 4000).
@@ -376,6 +420,80 @@ export default function Install({ onComplete }: Props) {
                 ✓ PostgreSQL sera configuré automatiquement sur <code>127.0.0.1:5432</code><br />
                 ✓ La DEK sera générée et sauvegardée dans <code>shared.env</code><br />
                 ✓ Le nœud actif démarrera automatiquement au lancement
+              </div>
+            )}
+
+            {(role === "primary" || role === "standby") && (
+              <div style={{ marginTop: 4, paddingTop: 20, borderTop: "1px solid var(--border)" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>⚡ Failover automatique (quorum)</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, cursor: "pointer" }}>
+                    <input type="checkbox" checked={enableFailover} onChange={e => setEnableFailover(e.target.checked)} />
+                    Activer
+                  </label>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: enableFailover ? 16 : 0 }}>
+                  Superviseur de quorum natif (sans Patroni). Promotion auto d'un standby si le primary tombe, protégée contre le split-brain.
+                </div>
+                {enableFailover && (
+                  <>
+                    {role === "standby" && (
+                      <div style={{ marginBottom: 14 }}>
+                        <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                          IP de cette machine (standby)
+                        </label>
+                        <input
+                          value={selfIp}
+                          onChange={e => setSelfIp(e.target.value)}
+                          style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                          placeholder="ex. 192.168.200.2"
+                        />
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 12, marginBottom: 14 }}>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                          IP autre machine 1
+                        </label>
+                        <input
+                          value={peerA}
+                          onChange={e => setPeerA(e.target.value)}
+                          style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                          placeholder="ex. 192.168.200.2"
+                        />
+                      </div>
+                      <div style={{ flex: 1 }}>
+                        <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 6 }}>
+                          IP autre machine 2
+                        </label>
+                        <input
+                          value={peerB}
+                          onChange={e => setPeerB(e.target.value)}
+                          style={{ width: "100%", background: "var(--surface2)", border: "1px solid var(--border)", color: "var(--text)", padding: "10px 14px", borderRadius: 8, fontSize: 14 }}
+                          placeholder="ex. 192.168.200.3"
+                        />
+                      </div>
+                    </div>
+                    {role === "standby" && (
+                      <div>
+                        <label style={{ display: "block", fontSize: 12, color: "var(--text-muted)", marginBottom: 8 }}>
+                          Priorité de succession
+                        </label>
+                        <div style={{ display: "flex", gap: 10 }}>
+                          <button type="button" className={rank === 0 ? "btn btn-primary" : "btn btn-ghost"} style={{ flex: 1 }} onClick={() => setRank(0)}>
+                            1er successeur (rang 0)
+                          </button>
+                          <button type="button" className={rank === 1 ? "btn btn-primary" : "btn btn-ghost"} style={{ flex: 1 }} onClick={() => setRank(1)}>
+                            2e successeur (rang 1)
+                          </button>
+                        </div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 6 }}>
+                          Le rang le plus faible encore joignable se promeut en priorité. Mettez un rang distinct sur chaque standby.
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             )}
 

@@ -70,7 +70,14 @@ Chaque superviseur expose :
 
 ### Démarrage des superviseurs
 
-**Sur le PC (primary) :**
+**Option A — depuis l'interface (recommandé, 0.1.14+).** L'assistant d'installation
+embarque désormais le failover : en choisissant le rôle **Nœud Actif** ou **Nœud
+Standby**, une section « ⚡ Failover automatique (quorum) » apparaît. Renseigner
+l'IP de cette machine (standby), les IP des 2 autres machines, et le rang (standby).
+Le superviseur démarre automatiquement à la fin de l'installation — aucun script
+manuel. Son `node_id` et ses pairs sont dérivés des IP (cohérents avec les slots PG).
+
+**Option B — via le script embarqué `04_start_supervisor.ps1` :**
 ```powershell
 .\scripts\windows\04_start_supervisor.ps1 `
     -Role primary -NodeId pc `
