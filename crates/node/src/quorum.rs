@@ -27,7 +27,7 @@ use std::collections::HashSet;
 /// Nombre de votes requis pour la majorité stricte d'un cluster de `total` nœuds.
 ///
 /// `majority(3) == 2`, `majority(2) == 2`, `majority(5) == 3`.
-/// Un cluster d'un seul nœud a une majorité de 1 (mode solo dégénéré).
+/// Un cluster d'un seul nœud a une majorité de 1 (cas dégénéré).
 pub fn majority(total: usize) -> usize {
     total / 2 + 1
 }

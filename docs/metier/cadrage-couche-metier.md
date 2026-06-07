@@ -82,7 +82,7 @@ et faillible — exactement ce que le projet a voulu éviter.
 **Conséquence pratique :** quand tu décriras tes invariants métier, on identifiera
 lesquels exigent cette atomicité. Ceux-là restent sur PostgreSQL (nœud actif). SQLite
 garde son rôle là où aucun arbitrage concurrent n'est en jeu : nœud passif (rejeu d'un
-journal déjà ordonné) et mode PME solo (mono-poste).
+journal déjà ordonné).
 
 ---
 

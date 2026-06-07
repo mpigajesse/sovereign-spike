@@ -235,7 +235,6 @@ impl BusinessStore for SqliteBusinessStore {
   - 1 test d'intégration prouvant l'indépendance journal/métier
 - **Où le trait est utilisé** :
   - Nœud **passif** → SQLite (réplique reconstruite depuis le journal) ✅
-  - Mode **PME solo / poste autonome** (futur) → SQLite seul, sans PostgreSQL
   - Nœud **actif** → **reste sur PostgreSQL délibérément** (voir §5bis)
 
 ---
@@ -292,7 +291,6 @@ Restaurer l'atomicité exigerait un **commit en deux phases (2PC)** — un proto
 | :--- | :--- | :--- |
 | **Actif** | PostgreSQL | ✅ **Oui** — il arbitre les écritures → mono-base obligatoire |
 | **Passif** | SQLite | ❌ Non — il **rejoue** un journal déjà ordonné, ne décide rien |
-| **PME solo** (futur) | SQLite | ❌ Non — un seul poste, pas de réplication, pas de journal séparé |
 
 Le nœud **passif** applique le stock et avance son pointeur `sync_state` dans **sa propre** transaction SQLite — mais il n'arbitre aucune écriture concurrente, donc aucun invariant métier n'est en jeu : la convergence vient de l'ordre du journal, pas d'un verrou.
 
@@ -301,15 +299,7 @@ Le nœud **passif** applique le stock et avance son pointeur `sync_state` dans *
 > Le trait `BusinessStore` prouve que le cœur métier est **découplé** du moteur de stockage.
 > Mais le découplage n'oblige pas à séparer les bases **partout** : sur l'actif, garder
 > métier+journal dans une transaction PostgreSQL unique est **un choix de sécurité**, pas une
-> dette technique. On utilise SQLite là où l'atomicité inter-bases n'est pas en jeu (passif, solo).
-
----
-
-## 5ter. Reste à faire — Mode PME solo (SQLite autonome)
-
-- **Phase 3** : Frontend Tauri embarque `SqliteBusinessStore` pour un **poste autonome**
-  (PME mono-poste sans PostgreSQL). Le trait est déjà prêt — il suffira de l'instancier
-  dans le backend Tauri pour un mode « démo / solo » qui ne dépend d'aucun serveur.
+> dette technique. On utilise SQLite là où l'atomicité inter-bases n'est pas en jeu (passif).
 
 ---
 

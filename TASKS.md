@@ -162,20 +162,24 @@
 - ✅ Icônes app générées (cargo tauri icon) — 2026-06-04
 - ✅ Bundle .exe NSIS + MSI (`tauri build`) — 4.9 MB — 2026-06-04
 - ✅ Sidecar `sovereign-node-active` embarqué dans le .exe
-- ✅ Assistant installation : choix du rôle (Solo/Primary/Standby/Client)
+- ✅ Assistant installation : choix du rôle (Primary/Standby/Relais/Client)
 
-### 3.2bis Mode PME Solo (SQLite autonome) ✅ LIVRÉ 2026-06-04
+### 3.2bis Mode PME Solo (SQLite autonome) — ❌ RETIRÉ 2026-06-07
 
-> Cible TPE mono-poste : tout-en-un sur SQLite, **zéro PostgreSQL**.
-
-- ✅ Binaire `sovereign-node-solo` — `crates/node/src/bin/solo_node.rs`
-  - ✅ Même API HTTP que l'actif (`/write`, `/stock`, `/journal`, `/epoch`)
-  - ✅ Métier + journal chiffré dans UNE base SQLite (atomicité préservée)
-  - ✅ Anti-survente, idempotence, journal chiffré, WAL + busy_timeout
-- ✅ Testé E2E : 7/7 (santé, stock, anti-survente, idempotence, journal, époque)
-- ✅ Persistance vérifiée (données conservées au redémarrage)
-- ✅ Embarqué dans le .exe + rôle "PME Solo" dans l'assistant
-- ✅ Redémarrage auto du nœud solo au relancement de l'app
+> Livré le 2026-06-04 (binaire `sovereign-node-solo`, rôle "PME Solo" dans
+> l'assistant, redémarrage auto, 7/7 tests E2E), puis **retiré** : ce mode
+> mono-poste sans PostgreSQL ne correspond pas à l'architecture officielle
+> retenue, qui impose toujours un cluster actif/passif (cf.
+> `officiel-docs/Architecture Haute Disponibilité SaaS.md`). Conservé ici
+> pour l'historique de livraison ; le code (binaire, sidecar, commandes
+> Tauri, UI d'installation) a été supprimé du dépôt.
+>
+> Détail de ce qui avait été livré :
+> - Binaire `sovereign-node-solo` (même API HTTP que l'actif : `/write`, `/stock`, `/journal`, `/epoch`)
+> - Métier + journal chiffré dans UNE base SQLite (atomicité préservée)
+> - Anti-survente, idempotence, journal chiffré, WAL + busy_timeout
+> - Testé E2E : 7/7 (santé, stock, anti-survente, idempotence, journal, époque)
+> - Persistance vérifiée, embarqué dans le .exe, redémarrage auto
 
 ### 3.3 Mobile UniFFI (Phase 3 avancée)
 

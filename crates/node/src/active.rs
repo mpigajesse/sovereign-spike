@@ -16,8 +16,8 @@
 //! commit en deux phases (2PC) — complexe et faillible.
 //!
 //! `BusinessStore`/`SqliteBusinessStore` sont réservés aux contextes SANS arbitrage
-//! d'écritures concurrentes : nœud passif (rejeu d'un journal déjà ordonné) et mode
-//! PME solo (mono-poste). Détail : docs/architecture/couches-responsabilites.md §5bis.
+//! d'écritures concurrentes : nœud passif (rejeu d'un journal déjà ordonné).
+//! Détail : docs/architecture/couches-responsabilites.md §5bis.
 
 use std::sync::Arc;
 

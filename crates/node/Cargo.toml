@@ -12,10 +12,6 @@ name = "sovereign-node-passive"
 path = "src/bin/passive_node.rs"
 
 [[bin]]
-name = "sovereign-node-solo"
-path = "src/bin/solo_node.rs"
-
-[[bin]]
 name = "sovereign-supervisor"
 path = "src/bin/supervisor.rs"
 

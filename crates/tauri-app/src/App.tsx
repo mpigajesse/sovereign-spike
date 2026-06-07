@@ -25,14 +25,12 @@ const NAV: { id: Page; label: string; icon: string }[] = [
   { id: "settings",  label: "Configuration",     icon: "⚙" },
 ];
 
-type AppState = "install" | "startup" | "solo-restart" | "primary-restart" | "relais-restart" | "ready";
+type AppState = "install" | "startup" | "primary-restart" | "relais-restart" | "ready";
 
 function getInitialState(): AppState {
   // Premier lancement : afficher l'assistant d'installation
   if (!localStorage.getItem("sovereign_installed")) return "install";
   const role = localStorage.getItem("sovereign_role");
-  // Relancement en mode solo : il faut redémarrer le nœud solo embarqué
-  if (role === "solo") return "solo-restart";
   // Relancement en mode primary : le nœud actif (process enfant) est mort
   // avec l'app précédente — il faut le relancer.
   if (role === "primary") return "primary-restart";
@@ -45,23 +43,13 @@ function getInitialState(): AppState {
 export default function App() {
   const [appState, setAppState] = useState<AppState>(getInitialState);
   const [page,     setPage]     = useState<Page>("dashboard");
-  const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby" | "solo">("remote");
+  const [nodeMode, setNodeMode] = useState<"local" | "remote" | "standby">("remote");
   const [version,  setVersion]  = useState("0.1.12");
 
   // Récupère la version réelle du bundle Tauri (source de vérité = tauri.conf.json)
   useEffect(() => {
     getVersion().then(setVersion).catch(() => { /* mode navigateur : garde le fallback */ });
   }, []);
-
-  // Redémarrage automatique du nœud solo au relancement de l'app
-  useEffect(() => {
-    if (appState !== "solo-restart") return;
-    const dek = localStorage.getItem("sovereign_dek")
-      ?? "174835f0e063680d4b4652c7edf9472a1db0626388dbbe4342d84a7c9bce035b";
-    invoke("start_solo_node", { dekHex: dek })
-      .catch(() => { /* déjà démarré ou mode navigateur */ })
-      .finally(() => { setNodeMode("solo"); setAppState("ready"); });
-  }, [appState]);
 
   // Redémarrage automatique du nœud actif (rôle primary) au relancement.
   // Le binaire lit DATABASE_URL/DEK par défaut côté Rust (cf. start_active_node).
@@ -97,10 +85,7 @@ export default function App() {
 
   const handleInstallComplete = () => {
     const role = localStorage.getItem("sovereign_role") ?? "client";
-    if (role === "solo") {
-      setNodeMode("solo");
-      setAppState("ready"); // Le nœud solo a déjà été démarré par l'assistant
-    } else if (role === "standby") {
+    if (role === "standby") {
       setNodeMode("standby");
       setAppState("ready");
     } else {
@@ -124,14 +109,6 @@ export default function App() {
   // ── Écrans de démarrage ──────────────────────────────────────────────────
   if (appState === "install")  return <Install  onComplete={handleInstallComplete} />;
   if (appState === "startup")  return <Startup  onReady={handleStartupReady} />;
-  if (appState === "solo-restart") return (
-    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)", gap: 20 }}>
-      <div style={{ fontSize: 48 }}>⬢</div>
-      <div style={{ fontSize: 18, fontWeight: 700 }}>Démarrage du nœud solo…</div>
-      <div style={{ fontSize: 13, color: "var(--text-muted)" }}>SQLite local — sans serveur</div>
-      <div style={{ fontSize: 32 }}><span className="spin">↻</span></div>
-    </div>
-  );
   if (appState === "primary-restart") return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "100vh", background: "var(--bg)", gap: 20 }}>
       <div style={{ fontSize: 48 }}>◉</div>
@@ -153,8 +130,7 @@ export default function App() {
   // Le badge reflète le RÔLE choisi à l'installation (source de vérité unique
   // = sovereign_role), et non l'état d'exécution nodeMode qui peut diverger.
   const storedRole = localStorage.getItem("sovereign_role");
-  const roleBadge = storedRole === "solo"    ? { label: "⬢ PME Solo",         color: "green" }
-                  : storedRole === "primary" ? { label: "✓ Actif (primary)",  color: "green" }
+  const roleBadge = storedRole === "primary" ? { label: "✓ Actif (primary)",  color: "green" }
                   : storedRole === "standby" ? { label: "◎ Standby",           color: "yellow" }
                   : storedRole === "relais"  ? { label: "◇ Relais aveugle",    color: "green" }
                   :                            { label: "○ Client",            color: "yellow" };
@@ -199,7 +175,7 @@ export default function App() {
         {/* Réinstaller — remise à zéro COMPLÈTE de la config locale, sinon un
             rôle/URL résiduel survit et fausse le tableau de bord (ex. badge
             "primary" coincé). On garde la DEK pour ne pas perdre l'accès aux
-            données chiffrées en mode solo. */}
+            données chiffrées déjà répliquées localement. */}
         <div
           style={{ padding: "8px 20px 16px", fontSize: 11, color: "var(--text-muted)", cursor: "pointer" }}
           onClick={() => {
