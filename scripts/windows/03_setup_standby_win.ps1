@@ -92,12 +92,18 @@ Write-Host "  OK - primary joignable"
 # Fix : connexion normale a "postgres" (le role 'replicator' a l'attribut
 # REPLICATION, suffisant pour appeler la fonction en SQL classique), et
 # verification explicite d'existence + code de sortie.
+# Piege n2 : "psql -t -A" ne renvoie RIEN (pas meme une ligne vide) quand la
+# requete retourne 0 ligne - le cas normal "le slot n'existe pas encore".
+# PowerShell assigne alors $null a $slotExists, et "$slotExists.Trim()" leve
+# "Impossible d'appeler une methode dans une expression Null", saute le bloc
+# if/else en silence (le slot n'est jamais cree) et fait echouer pg_basebackup
+# plus loin avec "le slot de replication n'existe pas". D'ou la garde "$slotExists -and ...".
 Write-Host ""
 Write-Host "[2b] Creation du slot de replication '$PG_SLOT' sur le primary..." -ForegroundColor Yellow
 $env:PGPASSWORD = "replicator_spike"
 $slotExists = & $psql -U replicator -h $PRIMARY_IP -p $PRIMARY_PORT -d "postgres" -t -A `
     -c "SELECT 1 FROM pg_replication_slots WHERE slot_name = '$PG_SLOT';"
-if ($slotExists.Trim() -eq "1") {
+if ($slotExists -and $slotExists.Trim() -eq "1") {
     Write-Host "  Slot '$PG_SLOT' existe deja - OK"
 } else {
     & $psql -U replicator -h $PRIMARY_IP -p $PRIMARY_PORT -d "postgres" `
